@@ -1,10 +1,9 @@
-"""
-PureJaxRL version of CleanRL's DQN: https://github.com/vwxyzjn/cleanrl/blob/master/cleanrl/dqn_jax.py
-"""
 import os
+import datetime
+import copy
+
 import jax
 import jax.numpy as jnp
-
 import chex
 import flax
 import wandb
@@ -15,6 +14,7 @@ from wrappers import LogWrapper, FlattenObservationWrapper
 import gymnax
 import flashbax as fbx
 
+from environments.rooms import TwoRoomsMultiTask
 
 class QNetwork(nn.Module):
     action_dim: int
@@ -30,14 +30,14 @@ class QNetwork(nn.Module):
 
 
 @chex.dataclass(frozen=True)
-class TimeStep:
+class MultiTaskTimeStep:
     obs: chex.Array
     action: chex.Array
     reward: chex.Array
     done: chex.Array
 
 
-class CustomTrainState(TrainState):
+class MultiTaskTrainState(TrainState):
     target_network_params: flax.core.FrozenDict # type: ignore
     timesteps: int
     n_updates: int
@@ -47,7 +47,7 @@ def make_train(config):
 
     config["NUM_UPDATES"] = config["TOTAL_TIMESTEPS"] // config["NUM_ENVS"]
 
-    basic_env, env_params = gymnax.make(config["ENV_NAME"])
+    basic_env, env_params = TwoRoomsMultiTask(), TwoRoomsMultiTask.default_params
     env = FlattenObservationWrapper(basic_env)
     env = LogWrapper(env) # type: ignore
 
@@ -82,7 +82,7 @@ def make_train(config):
         _action = basic_env.action_space().sample(rng)
         _, _env_state = env.reset(rng, env_params)
         _obs, _, _reward, _done, _ = env.step(rng, _env_state, _action, env_params)
-        _timestep = TimeStep(obs=_obs, action=_action, reward=_reward, done=_done) # type: ignore
+        _timestep = MultiTaskTimeStep(obs=_obs, action=_action, reward=_reward, done=_done) # type: ignore
         buffer_state = buffer.init(_timestep)
 
         # INIT NETWORK AND OPTIMIZER
@@ -98,7 +98,7 @@ def make_train(config):
         lr = linear_schedule if config.get("LR_LINEAR_DECAY", False) else config["LR"]
         tx = optax.adam(learning_rate=lr)
 
-        train_state = CustomTrainState.create(
+        train_state = MultiTaskTrainState.create(
             apply_fn=network.apply,
             params=network_params,
             target_network_params=jax.tree_util.tree_map(lambda x: jnp.copy(x), network_params),
@@ -151,7 +151,7 @@ def make_train(config):
             )  # update timesteps count
 
             # BUFFER UPDATE
-            timestep = TimeStep(obs=last_obs, action=action, reward=reward, done=done) # type: ignore
+            timestep = MultiTaskTimeStep(obs=last_obs, action=action, reward=reward, done=done) # type: ignore
             buffer_state = buffer.add(buffer_state, timestep)
 
             # NETWORKS UPDATE
@@ -254,7 +254,7 @@ def main():
         "NUM_ENVS": 1,
         "BUFFER_SIZE": 10000,
         "BUFFER_BATCH_SIZE": 128,
-        "TOTAL_TIMESTEPS": 5e5,
+        "TOTAL_TIMESTEPS": 3e5, #5e5,
         "EPSILON_START": 1.0,
         "EPSILON_FINISH": 0.05,
         "EPSILON_ANNEAL_TIME": 25e4,
@@ -266,27 +266,31 @@ def main():
         "GAMMA": 0.99,
         "TAU": 1.0,
         "ENV_NAME": "CartPole-v1",
-        "SEED": 2,
-        "NUM_SEEDS": 1,
+        "SEED": [0, 1, 2],
+        "NUM_ENVS_PER_SEED": 1,
         "WANDB_MODE": "online",  # set to online to activate wandb
         "ENTITY": "odiamond-personal",
         "PROJECT": "feature-attainment-purejaxrl",
     }
 
-    wandb.init(
-        entity=config["ENTITY"],
-        project=config["PROJECT"],
-        tags=["DQN", config["ENV_NAME"].upper(), f"jax_{jax.__version__}"],
-        name=f'purejaxrl_dqn_{config["ENV_NAME"]}',
-        config=config,
-        mode=config["WANDB_MODE"],
-    )
+    seeds = copy.deepcopy(config["SEED"])
 
+    for seed in seeds:
+        config["SEED"] = seed
+        current_time = datetime.datetime.now().strftime("%y-%d-%H-%M")
+        wandb.init(
+            entity=config["ENTITY"],
+            project=config["PROJECT"],
+            tags=["DQN_MULTITASK", config["ENV_NAME"].upper(), f"jax_{jax.__version__}"],
+            name=f'purejaxrl_dqn_multitask_{config["ENV_NAME"]}_{current_time}',
+            config=config,
+            mode=config["WANDB_MODE"],
+        )
 
-    rng = jax.random.PRNGKey(config["SEED"])
-    rngs = jax.random.split(rng, config["NUM_SEEDS"])
-    train_vjit = jax.jit(jax.vmap(make_train(config)))
-    outs = jax.block_until_ready(train_vjit(rngs))
+        rng = jax.random.PRNGKey(config["SEED"])
+        rngs = jax.random.split(rng, config["NUM_ENVS_PER_SEED"])
+        train_vjit = jax.jit(jax.vmap(make_train(config)))
+        outs = jax.block_until_ready(train_vjit(rngs))
 
 
 if __name__ == "__main__":

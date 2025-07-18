@@ -116,6 +116,32 @@ class TwoRoomsMultiTask(environment.Environment[EnvState, EnvParams]):
         done = jnp.logical_or(done_goal, done_steps)
         return done
 
+    def get_obs(
+        self,
+        state: EnvState,
+        params: EnvParams,
+        key = None,
+    ) -> jax.Array:
+        """Return observation from raw state info."""
+        # N x N image with 3 Channels: [Wall, Empty, Agent]
+        obs = jnp.zeros((params.N, params.N, 3), dtype=jnp.float32)
+        obs = obs.at[:, :, 1].set(1) # Set all cells to empty
+        
+        wall_y = state.hallway_loc[1] # y-coordinate of the hallway
+        
+        # Set all non-hallway cells in the dividing column to walls
+        obs = obs.at[
+            jnp.arange(params.N) != state.hallway_loc[0], wall_y, 1
+        ].set(0)
+        obs = obs.at[
+            jnp.arange(params.N) != state.hallway_loc[0], wall_y, 0
+        ].set(1)
+        
+        # Set agent location
+        obs = obs.at[state.agent_loc[0], state.agent_loc[1], 1].set(0)
+        obs = obs.at[state.agent_loc[0], state.agent_loc[1], 2].set(1)
+        return obs
+
     @property
     def name(self) -> str:
         """Environment name."""

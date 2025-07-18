@@ -16,16 +16,29 @@ import flashbax as fbx
 
 from environments.rooms import TwoRoomsMultiTask
 
-class QNetwork(nn.Module):
+class MultiTaskMazeQNetwork(nn.Module):
     action_dim: int
+    n_tasks: int
 
+    def setup(self):
+        # TODO: init in call with compact, dont need seperate setup
+        self.conv = nn.Conv(
+            features=32, 
+            kernel_size=(4,4),
+            strides=(1,1),
+            padding=[(1, 1), (1, 1)],
+            
+        )
+        self.shared_rep = nn.Dense(120, name="shared_rep")
+        self.task_reps = [nn.Dense(84, name=f"task_rep_{i}") for i in range(self.n_tasks)]
+        self.task_heads = [nn.Dense(self.action_dim, name=f"task_head_{i}") for i in range(self.n_tasks)]
     @nn.compact
-    def __call__(self, x: jnp.ndarray):
-        x = nn.Dense(120)(x)
+    def __call__(self, x: jnp.ndarray, task: int):
+        x = nn.Dense(120, name="dense_1")(x)
         x = nn.relu(x)
-        x = nn.Dense(84)(x)
+        x = nn.Dense(84, name="dense_2")(x)
         x = nn.relu(x)
-        x = nn.Dense(self.action_dim)(x)
+        x = nn.Dense(self.action_dim, name="dense_3")(x)
         return x
 
 
@@ -48,8 +61,7 @@ def make_train(config):
     config["NUM_UPDATES"] = config["TOTAL_TIMESTEPS"] // config["NUM_ENVS"]
 
     basic_env, env_params = TwoRoomsMultiTask(), TwoRoomsMultiTask.default_params
-    env = FlattenObservationWrapper(basic_env)
-    env = LogWrapper(env) # type: ignore
+    env = LogWrapper(basic_env) # type: ignore
 
     vmap_reset = lambda n_envs: lambda rng: jax.vmap(env.reset, in_axes=(0, None))(
         jax.random.split(rng, n_envs), env_params
@@ -86,7 +98,7 @@ def make_train(config):
         buffer_state = buffer.init(_timestep)
 
         # INIT NETWORK AND OPTIMIZER
-        network = QNetwork(action_dim=env.action_space(env_params).n)
+        network = MultiTaskMazeQNetwork(action_dim=env.action_space(env_params).n)
         rng, _rng = jax.random.split(rng)
         init_x = jnp.zeros(env.observation_space(env_params).shape)
         network_params = network.init(_rng, init_x)
@@ -171,12 +183,12 @@ def make_train(config):
                 def _loss_fn(params):
                     q_vals = network.apply(
                         params, learn_batch.first.obs
-                    )  # (batch_size, num_actions)
-                    chosen_action_qvals = jnp.take_along_axis(
-                        q_vals, # type: ignore
-                        jnp.expand_dims(learn_batch.first.action, axis=-1),
-                        axis=-1,
-                    ).squeeze(axis=-1)
+                    )  # (batch_size, n_tasks, num_actions)
+                    chosen_action_qvals = q_vals[
+                        jnp.arange(q_vals.shape[0]), 
+                        learn_batch.first.tasks, 
+                        learn_batch.first.action
+                        ]
                     return jnp.mean((chosen_action_qvals - target) ** 2)
 
                 loss, grads = jax.value_and_grad(_loss_fn)(train_state.params)
@@ -253,7 +265,7 @@ def main():
     config = {
         "NUM_ENVS": 1,
         "BUFFER_SIZE": 10000,
-        "BUFFER_BATCH_SIZE": 128,
+        "BUFFER_BATCH_SIZE": 32,
         "TOTAL_TIMESTEPS": 3e5, #5e5,
         "EPSILON_START": 1.0,
         "EPSILON_FINISH": 0.05,

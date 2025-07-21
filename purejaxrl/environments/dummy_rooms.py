@@ -24,10 +24,8 @@ class EnvState(environment.EnvState):
 @struct.dataclass
 class EnvParams(environment.EnvParams):
     goal_loc: jax.Array = dataclasses.field(default_factory=lambda: jnp.array([0, +4]))
-    start_loc: jax.Array = dataclasses.field(default_factory=lambda: jnp.array([0, 0]))
-    hallway_locs: jax.Array = dataclasses.field(default_factory=lambda: jnp.array([[+2, +2]])) # jnp.array([[0, 2], [2, 2], [4, 2]]))
     max_steps_in_episode: int = 500
-    # N: int = 5
+    N: int = 5
     
 
 class TwoRooms(environment.Environment[EnvState, EnvParams]):
@@ -36,15 +34,14 @@ class TwoRooms(environment.Environment[EnvState, EnvParams]):
     ):
         super().__init__()
         self.directions = jnp.array([[-1, 0], [0, 1], [1, 0], [0, -1]])
-        self.N = 5
+        self.start_loc: jax.Array = jnp.array([0, 0])
+        self.hallway_locs: jax.Array = jnp.array([[+2, +2]]) # jnp.array([[0, 2], [2, 2], [4, 2]]))
 
     @property
     def default_params(self) -> EnvParams:
         # Default environment parameters
         return EnvParams(
             goal_loc=jnp.array([0, +4]), 
-            start_loc=jnp.array([0, 0]),
-            hallway_locs=jnp.array([[+2, +2]])
         )
 
     def step_env(
@@ -57,7 +54,7 @@ class TwoRooms(environment.Environment[EnvState, EnvParams]):
         """Perform single timestep state transition."""
         # Get new agent location based on action
         agent_loc_new = jnp.clip(
-            state.agent_loc + self.directions[action], 0, self.N - 1
+            state.agent_loc + self.directions[action], 0, params.N - 1
         )
         on_obstacle = (agent_loc_new[1] == state.hallway_loc[1]) and (
             agent_loc_new[0] != state.hallway_loc[0]
@@ -93,14 +90,14 @@ class TwoRooms(environment.Environment[EnvState, EnvParams]):
         """Reset environment state by sampling hallway and start loc."""
         # Reset both the agents position (deterministic) and the hallway location (random)
         hallway_idx = jax.random.randint(
-            key, (), 0, params.hallway_locs.shape[0]
+            key, (), 0, self.hallway_locs.shape[0]
         )
-        hallway_loc = params.hallway_locs[hallway_idx]
+        hallway_loc = self.hallway_locs[hallway_idx]
 
         state = EnvState(
             time=0,
             hallway_loc=hallway_loc,
-            agent_loc=params.start_loc,
+            agent_loc=self.start_loc,
     )
 
         return self.get_obs(state, params), state
@@ -123,22 +120,18 @@ class TwoRooms(environment.Environment[EnvState, EnvParams]):
     ) -> jax.Array:
         """Return observation from raw state info."""
         # N x N image with 3 Channels: [Wall, Empty, Agent]
-        obs = jnp.zeros((self.N, self.N, 3), dtype=jnp.float32)
+        obs = jnp.zeros((params.N, params.N, 3), dtype=jnp.float32)
         obs = obs.at[:, :, 1].set(1) # Set all cells to empty
         
         wall_y = state.hallway_loc[1] # y-coordinate of the hallway
         
         # Set all non-hallway cells in the dividing column to walls
-        wall_mask = jnp.arange(self.N) != state.hallway_loc[0]
-
-        # Update empty channel (set to 0 where there are walls)
-        obs = obs.at[:, wall_y, 1].set(
-            jnp.where(wall_mask, 0, obs[:, wall_y, 1])
-        )
-        # Update wall channel (set to 1 where there are walls)
-        obs = obs.at[:, wall_y, 0].set(
-            jnp.where(wall_mask, 1, obs[:, wall_y, 0])
-        )
+        obs = obs.at[
+            jnp.arange(params.N) != state.hallway_loc[0], wall_y, 1
+        ].set(0)
+        obs = obs.at[
+            jnp.arange(params.N) != state.hallway_loc[0], wall_y, 0
+        ].set(1)
         
         # Set agent location
         obs = obs.at[state.agent_loc[0], state.agent_loc[1], 1].set(0)
@@ -161,7 +154,7 @@ class TwoRooms(environment.Environment[EnvState, EnvParams]):
 
     def observation_space(self, params: EnvParams) -> spaces.Box:
         """Observation space of the environment."""
-        return spaces.Box(0, 1, (self.N, self.N, 3), jnp.float32)
+        return spaces.Box(0, 1, (params.N, params.N, 3), jnp.float32)
 
 
     def state_space(self, params: EnvParams) -> spaces.Dict:
@@ -170,13 +163,13 @@ class TwoRooms(environment.Environment[EnvState, EnvParams]):
             {
                 "hallway_loc": spaces.Box(
                     0,
-                    self.N,
+                    params.N,
                     (2,),
                     jnp.float32,
                 ),
                 "agent_loc": spaces.Box(
                     0,
-                    self.N,
+                    params.N,
                     (2,),
                     jnp.float32,
                 ),

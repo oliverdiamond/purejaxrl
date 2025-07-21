@@ -4,6 +4,7 @@ PureJaxRL version of CleanRL's DQN: https://github.com/vwxyzjn/cleanrl/blob/mast
 import os
 import jax
 import jax.numpy as jnp
+import math
 
 import chex
 import flax
@@ -11,21 +12,39 @@ import wandb
 import optax
 import flax.linen as nn
 from flax.training.train_state import TrainState
+from flax.linen.initializers import variance_scaling
 from wrappers import LogWrapper, FlattenObservationWrapper
 import gymnax
 import flashbax as fbx
+from environments.rooms import TwoRooms
 
-
-class QNetwork(nn.Module):
+class MazeQNetwork(nn.Module):
     action_dim: int
 
     @nn.compact
     def __call__(self, x: jnp.ndarray):
-        x = nn.Dense(120)(x)
+        w_conv_init = variance_scaling(scale=math.sqrt(5), mode='fan_avg', distribution='uniform')
+        w_init = variance_scaling(scale=1.0, mode='fan_avg', distribution='uniform')
+
+        # Conv Backbone
+        x = nn.Conv(
+            features=32, kernel_size=(4, 4), strides=(1, 1), padding=[(1, 1), (1, 1)],
+            kernel_init=w_conv_init, name="conv1"
+        )(x)
         x = nn.relu(x)
-        x = nn.Dense(84)(x)
+        x = nn.Conv(
+            features=16, kernel_size=(4, 4), strides=(2, 2), padding=[(2, 2), (2, 2)],
+            kernel_init=w_conv_init, name="conv2"
+        )(x)
         x = nn.relu(x)
-        x = nn.Dense(self.action_dim)(x)
+        x = x.reshape((x.shape[0], -1))  # Flatten
+
+        # representation layer
+        x = nn.Dense(64, kernel_init=w_init, name="rep")(x)
+        x = nn.relu(x)
+        
+        x = nn.Dense(self.action_dim, kernel_init=w_init, name="head")(x)
+
         return x
 
 
@@ -47,9 +66,11 @@ def make_train(config):
 
     config["NUM_UPDATES"] = config["TOTAL_TIMESTEPS"] // config["NUM_ENVS"]
 
-    basic_env, env_params = gymnax.make(config["ENV_NAME"])
-    #env = FlattenObservationWrapper(basic_env)
-    #env = LogWrapper(env) # type: ignore
+    # basic_env, env_params = gymnax.make(config["ENV_NAME"])
+    # env = FlattenObservationWrapper(basic_env)
+    # env = LogWrapper(env) # type: ignore
+    basic_env = TwoRooms()
+    env_params = basic_env.default_params
     env = LogWrapper(basic_env) # type: ignore
 
     vmap_reset = lambda n_envs: lambda rng: jax.vmap(env.reset, in_axes=(0, None))(
@@ -87,7 +108,7 @@ def make_train(config):
         buffer_state = buffer.init(_timestep)
 
         # INIT NETWORK AND OPTIMIZER
-        network = QNetwork(action_dim=env.action_space(env_params).n)
+        network = MazeQNetwork(action_dim=env.action_space(env_params).n)
         rng, _rng = jax.random.split(rng)
         init_x = jnp.zeros(env.observation_space(env_params).shape)
         network_params = network.init(_rng, init_x)
@@ -268,7 +289,7 @@ def main():
         "ENV_NAME": "Acrobot-v1",
         "SEED": 2,
         "NUM_SEEDS": 1,
-        "WANDB_MODE": "online",  # set to online to activate wandb
+        "WANDB_MODE": "disabled",  # set to online to activate wandb
         "ENTITY": "odiamond-personal",
         "PROJECT": "feature-attainment-purejaxrl",
     }

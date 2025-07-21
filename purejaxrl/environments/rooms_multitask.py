@@ -6,7 +6,7 @@ automatically resets env at done, we abstract different resets
 """
 
 from typing import Any
-import dataclasses
+from dataclasses import field
 
 import jax
 import jax.numpy as jnp
@@ -18,34 +18,33 @@ from gymnax.environments import environment, spaces
 @struct.dataclass
 class EnvState(environment.EnvState):
     time: int
+    task: jax.Array
     hallway_loc: jax.Array
     agent_loc: jax.Array
 
 @struct.dataclass
 class EnvParams(environment.EnvParams):
-    goal_loc: jax.Array = dataclasses.field(default_factory=lambda: jnp.array([0, +4]))
-    start_loc: jax.Array = dataclasses.field(default_factory=lambda: jnp.array([0, 0]))
-    hallway_locs: jax.Array = dataclasses.field(default_factory=lambda: jnp.array([[+2, +2]])) # jnp.array([[0, 2], [2, 2], [4, 2]]))
+    n_tasks: int = 3
     max_steps_in_episode: int = 500
-    # N: int = 5
-    
+    #N: int = 5 Hardcoding for now but could make this a parameter if I define a max N and then use jax.lax.dynamic_slice to get a chunk
+    goal_loc: jax.Array = field(default_factory=lambda: jnp.array([0, 4]))
+    start_loc: jax.Array = field(default_factory=lambda: jnp.array([0, 0]))
+    hallway_locs: jax.Array = field(default_factory=lambda: jnp.array([[0, 2], [2, 2], [4, 2]]))
 
-class TwoRooms(environment.Environment[EnvState, EnvParams]):
+
+class TwoRoomsMultiTask(environment.Environment[EnvState, EnvParams]):
     def __init__(
         self,
     ):
         super().__init__()
         self.directions = jnp.array([[-1, 0], [0, 1], [1, 0], [0, -1]])
-        self.N = 5
+        self.N: int = 5
+
 
     @property
     def default_params(self) -> EnvParams:
         # Default environment parameters
-        return EnvParams(
-            goal_loc=jnp.array([0, +4]), 
-            start_loc=jnp.array([0, 0]),
-            hallway_locs=jnp.array([[+2, +2]])
-        )
+        return EnvParams()
 
     def step_env(
         self,
@@ -68,6 +67,7 @@ class TwoRooms(environment.Environment[EnvState, EnvParams]):
 
         state = EnvState(
             time=state.time + 1,
+            task=state.task,
             hallway_loc=state.hallway_loc,
             agent_loc=agent_loc_new,
         )
@@ -99,6 +99,7 @@ class TwoRooms(environment.Environment[EnvState, EnvParams]):
 
         state = EnvState(
             time=0,
+            task=hallway_idx,
             hallway_loc=hallway_loc,
             agent_loc=params.start_loc,
     )
@@ -129,16 +130,12 @@ class TwoRooms(environment.Environment[EnvState, EnvParams]):
         wall_y = state.hallway_loc[1] # y-coordinate of the hallway
         
         # Set all non-hallway cells in the dividing column to walls
-        wall_mask = jnp.arange(self.N) != state.hallway_loc[0]
-
-        # Update empty channel (set to 0 where there are walls)
-        obs = obs.at[:, wall_y, 1].set(
-            jnp.where(wall_mask, 0, obs[:, wall_y, 1])
-        )
-        # Update wall channel (set to 1 where there are walls)
-        obs = obs.at[:, wall_y, 0].set(
-            jnp.where(wall_mask, 1, obs[:, wall_y, 0])
-        )
+        obs = obs.at[
+            jnp.arange(self.N) != state.hallway_loc[0], wall_y, 1
+        ].set(0)
+        obs = obs.at[
+            jnp.arange(self.N) != state.hallway_loc[0], wall_y, 0
+        ].set(1)
         
         # Set agent location
         obs = obs.at[state.agent_loc[0], state.agent_loc[1], 1].set(0)
@@ -181,5 +178,6 @@ class TwoRooms(environment.Environment[EnvState, EnvParams]):
                     jnp.float32,
                 ),
                 "time": spaces.Discrete(params.max_steps_in_episode),
+                "task": spaces.Discrete(params.n_tasks),
             }
         )

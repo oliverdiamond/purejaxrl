@@ -26,7 +26,7 @@ class EnvState(environment.EnvState):
 class EnvParams(environment.EnvParams):
     n_tasks: int = 3
     max_steps_in_episode: int = 500
-    #N: int = 5 Hardcoding for now but could make this a parameter if I define a max N and then use jax.lax.dynamic_slice to get a chunk
+    N: int = 5
     goal_loc: jax.Array = field(default_factory=lambda: jnp.array([0, 4]))
     start_loc: jax.Array = field(default_factory=lambda: jnp.array([0, 0]))
     hallway_locs: jax.Array = field(default_factory=lambda: jnp.array([[0, 2], [2, 2], [4, 2]]))
@@ -38,7 +38,7 @@ class TwoRoomsMultiTask(environment.Environment[EnvState, EnvParams]):
     ):
         super().__init__()
         self.directions = jnp.array([[-1, 0], [0, 1], [1, 0], [0, -1]])
-        self.N: int = 5
+        self.N: int = 5  # Hardcoded for now, could be parameterized later
 
 
     @property
@@ -58,7 +58,8 @@ class TwoRoomsMultiTask(environment.Environment[EnvState, EnvParams]):
         agent_loc_new = jnp.clip(
             state.agent_loc + self.directions[action], 0, self.N - 1
         )
-        on_obstacle = (agent_loc_new[1] == state.hallway_loc[1]) and (
+        on_obstacle = jnp.logical_and(
+            agent_loc_new[1] == state.hallway_loc[1],
             agent_loc_new[0] != state.hallway_loc[0]
         )
         agent_loc_new = jax.lax.select(
@@ -78,13 +79,14 @@ class TwoRoomsMultiTask(environment.Environment[EnvState, EnvParams]):
         )
 
         done = self.is_terminal(state, params)
+        truncated = self.is_truncated(state, params)
 
         return (
             jax.lax.stop_gradient(self.get_obs(state, params=params)),
             jax.lax.stop_gradient(state),
             reward,
             done,
-            {}
+            {"truncated": truncated}
         )
 
     def reset_env(
@@ -108,13 +110,19 @@ class TwoRoomsMultiTask(environment.Environment[EnvState, EnvParams]):
 
     def is_terminal(self, state: EnvState, params: EnvParams) -> jax.Array:
         """Check whether state is terminal."""
-        # Check number of steps in episode termination condition
-        done_steps = state.time >= params.max_steps_in_episode
+        done_steps = self.is_truncated(state, params)
         # Check if agent has found the goal
         done_goal = jnp.array_equal(state.agent_loc, params.goal_loc)
         
         done = jnp.logical_or(done_goal, done_steps)
         return done
+
+    def is_truncated(self, state: EnvState, params: EnvParams) -> jax.Array:
+        """Check whether episode timeout is reached."""
+        # Check number of steps in episode termination condition
+        done_steps = state.time >= params.max_steps_in_episode
+
+        return jnp.array(done_steps)
 
     def get_obs(
         self,
@@ -130,12 +138,16 @@ class TwoRoomsMultiTask(environment.Environment[EnvState, EnvParams]):
         wall_y = state.hallway_loc[1] # y-coordinate of the hallway
         
         # Set all non-hallway cells in the dividing column to walls
-        obs = obs.at[
-            jnp.arange(self.N) != state.hallway_loc[0], wall_y, 1
-        ].set(0)
-        obs = obs.at[
-            jnp.arange(self.N) != state.hallway_loc[0], wall_y, 0
-        ].set(1)
+        wall_mask = jnp.arange(self.N) != state.hallway_loc[0]
+
+        # Update empty channel (set to 0 where there are walls)
+        obs = obs.at[:, wall_y, 1].set(
+            jnp.where(wall_mask, 0, obs[:, wall_y, 1])
+        )
+        # Update wall channel (set to 1 where there are walls)
+        obs = obs.at[:, wall_y, 0].set(
+            jnp.where(wall_mask, 1, obs[:, wall_y, 0])
+        )
         
         # Set agent location
         obs = obs.at[state.agent_loc[0], state.agent_loc[1], 1].set(0)

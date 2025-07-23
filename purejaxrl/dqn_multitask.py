@@ -14,25 +14,42 @@ from flax.linen.initializers import variance_scaling
 from flax.training.train_state import TrainState
 import flashbax as fbx
 
-from wrappers import LogWrapper
+from wrappers import MultiTaskLogWrapper
 from environments.rooms_multitask import TwoRoomsMultiTask
 
 class TaskNet(nn.Module):
     action_dim: int
     n_features: int
 
-    @nn.compact
+    def setup(self):
+        self.task_rep = nn.Dense(self.n_features, name="task_rep")
+        self.task_head = nn.Dense(self.action_dim, name="task_head")
+    
     def __call__(self, common_input: jnp.ndarray, shared_rep: jnp.ndarray) -> jnp.ndarray:
         # Task-specific representation layer
-        task_rep = nn.Dense(self.n_features, name="task_rep")(common_input)
+        task_rep = self.task_rep(common_input)
         task_rep = nn.relu(task_rep)
 
         # Concatenate with the shared representation
         combined_rep = jnp.concatenate([shared_rep, task_rep], axis=-1)
 
         # Task-specific output head
-        q_values = nn.Dense(self.action_dim, name="task_head")(combined_rep)
+        q_values = self.task_head(combined_rep)
         return q_values
+    
+    def get_activations(self, common_input: jnp.ndarray, shared_rep: jnp.ndarray) -> dict[str, jnp.ndarray]:
+        """Returns intermediate activations."""
+        task_rep = self.task_rep(common_input)
+        task_rep = nn.relu(task_rep)
+
+        combined_rep = jnp.concatenate([shared_rep, task_rep], axis=-1)
+
+        q_values = self.task_head(combined_rep)
+
+        return {
+            "task_rep": task_rep,
+            "q_values": q_values
+        }
 
 class MultiTaskMazeQNetwork(nn.Module):
     action_dim: int
@@ -40,20 +57,55 @@ class MultiTaskMazeQNetwork(nn.Module):
     n_features_per_task: int
     n_shared_expand: int
     n_shared_bottleneck: int
+    n_features_conv1: int
+    n_features_conv2: int
 
-    @nn.compact
-    def __call__(self, x: jnp.ndarray, task: jnp.ndarray):
+    def setup(self):
         w_conv_init = variance_scaling(scale=math.sqrt(5), mode='fan_avg', distribution='uniform')
         w_init = variance_scaling(scale=1.0, mode='fan_avg', distribution='uniform')
 
         # Conv Backbone
+        self.conv1 = nn.Conv(
+            features=self.n_features_conv1, kernel_size=(4, 4), strides=(1, 1), padding=[(1, 1), (1, 1)],
+            kernel_init=w_conv_init, name="conv1"
+        )
+        self.conv2 = nn.Conv(
+            features=self.n_features_conv2, kernel_size=(4, 4), strides=(2, 2), padding=[(2, 2), (2, 2)],
+            kernel_init=w_conv_init, name="conv2"
+        )
+
+        # Shared representation layers
+        self.shared_rep_expand = nn.Dense(self.n_shared_expand, kernel_init=w_init, name="shared_rep_expand")
+        self.shared_rep_bottleneck = nn.Dense(self.n_shared_bottleneck, kernel_init=w_init, name="shared_rep_bottleneck")
+
+        # Task-specific networks
+        # TODO Figure out how to do this with one TaskNets func and pass multiple methods
+        self.TaskNets = nn.vmap(
+            TaskNet,
+            variable_axes={'params': 0},
+            split_rngs={'params': True},
+            in_axes=(None, None),
+            out_axes=0,
+            axis_size=self.n_tasks,
+        )
+
+    def get_common_representation(self, x: jnp.ndarray):
+        x = self.conv1(x)
+        x = nn.relu(x)
+        x = self.conv2(x)
+        x = nn.relu(x)
+        return x.reshape((x.shape[0], -1))  # Flatten
+
+    def __call__(self, x: jnp.ndarray, task: jnp.ndarray):
+
+        # Conv Backbone
         x = nn.Conv(
-            features=32, kernel_size=(4, 4), strides=(1, 1), padding=[(1, 1), (1, 1)],
+            features=self.n_features_conv1, kernel_size=(4, 4), strides=(1, 1), padding=[(1, 1), (1, 1)],
             kernel_init=w_conv_init, name="conv1"
         )(x)
         x = nn.relu(x)
         x = nn.Conv(
-            features=16, kernel_size=(4, 4), strides=(2, 2), padding=[(2, 2), (2, 2)],
+            features=self.n_features_conv2, kernel_size=(4, 4), strides=(2, 2), padding=[(2, 2), (2, 2)],
             kernel_init=w_conv_init, name="conv2"
         )(x)
         x = nn.relu(x)
@@ -88,6 +140,7 @@ class MultiTaskMazeQNetwork(nn.Module):
 @chex.dataclass(frozen=True)
 class MultiTaskTimeStep:
     obs: chex.Array
+    next_obs: chex.Array
     task: chex.Array
     action: chex.Array
     reward: chex.Array
@@ -106,7 +159,7 @@ def make_train(config):
 
     basic_env = TwoRoomsMultiTask()
     env_params = basic_env.default_params
-    env = LogWrapper(basic_env) # type: ignore
+    env = MultiTaskLogWrapper(basic_env) # type: ignore
 
     vmap_reset = lambda n_envs: lambda rng: jax.vmap(env.reset, in_axes=(0, None))(
         jax.random.split(rng, n_envs), env_params
@@ -122,12 +175,12 @@ def make_train(config):
         init_obs, env_state = vmap_reset(config["NUM_ENVS"])(_rng)
 
         # INIT BUFFER
-        buffer = fbx.make_flat_buffer(
+        buffer = fbx.make_item_buffer(
             max_length=config["BUFFER_SIZE"],
             min_length=config["BUFFER_BATCH_SIZE"],
             sample_batch_size=config["BUFFER_BATCH_SIZE"],
             add_sequences=False,
-            add_batch_size=config["NUM_ENVS"],
+            add_batches=True,
         )
         buffer = buffer.replace( # type: ignore
             init=jax.jit(buffer.init),
@@ -137,9 +190,9 @@ def make_train(config):
         )
         rng = jax.random.PRNGKey(0)  # use a dummy rng here
         _action = basic_env.action_space().sample(rng)
-        _, _env_state = env.reset(rng, env_params)
-        _obs, _env_state, _reward, _done, _ = env.step(rng, _env_state, _action, env_params)
-        _timestep = MultiTaskTimeStep(obs=_obs, task=_env_state.task, action=_action, reward=_reward, done=_done) # type: ignore
+        _last_obs, _last_env_state = env.reset(rng, env_params)
+        _obs, _env_state, _reward, _done, _ = env.step(rng, _last_env_state, _action, env_params)
+        _timestep = MultiTaskTimeStep(obs=_last_obs, next_obs=_obs, task=_last_env_state.env_state.task, action=_action, reward=_reward, done=_done) # type: ignore
         buffer_state = buffer.init(_timestep)
 
         # INIT NETWORK AND OPTIMIZER
@@ -149,10 +202,12 @@ def make_train(config):
             n_features_per_task=config["N_FEATURES_PER_TASK"],
             n_shared_expand=config["N_SHARED_EXPAND"],
             n_shared_bottleneck=config["N_SHARED_BOTTLENECK"],
+            n_features_conv1=config["N_FEATURES_CONV1"],
+            n_features_conv2=config["N_FEATURES_CONV2"],
             )
         rng, _rng = jax.random.split(rng)
         init_x = jnp.zeros((1,) + env.observation_space(env_params).shape) # Conv layers need extra dimension for batch size
-        init_task = jnp.zeros((1,))
+        init_task = jnp.zeros((1,), dtype=jnp.int32)
         network_params = network.init(_rng, init_x, init_task)
 
         def linear_schedule(count):
@@ -203,7 +258,7 @@ def make_train(config):
 
             # STEP THE ENV
             rng, rng_a, rng_s = jax.random.split(rng, 3)
-            q_vals = network.apply(train_state.params, last_obs)
+            q_vals = network.apply(train_state.params, last_obs, last_env_state.env_state.task)
             action = eps_greedy_exploration(
                 rng_a, q_vals, train_state.timesteps
             )  # explore with epsilon greedy_exploration
@@ -215,9 +270,12 @@ def make_train(config):
             )  # update timesteps count
 
             # BUFFER UPDATE
-            timestep = MultiTaskTimeStep(obs=last_obs, task=last_env_state.task , action=action, reward=reward, done=done) # type: ignore
-            buffer_state = buffer.add(buffer_state, timestep)
-
+            timestep = MultiTaskTimeStep(obs=last_obs, next_obs=obs, task=last_env_state.env_state.task , action=action, reward=reward, done=done) # type: ignore
+            buffer_state = jax.lax.cond(
+                info['truncated'].any(),  # if any envs are truncated, do not add to buffer. Note this makes parallel envs not work!
+                lambda: buffer_state,
+                lambda: buffer.add(buffer_state, timestep),
+            )
             # NETWORKS UPDATE
             def _learn_phase(train_state, rng):
 
@@ -225,24 +283,24 @@ def make_train(config):
 
                 q_next_target = network.apply(
                     train_state.target_network_params, 
-                    learn_batch.second.obs, 
-                    learn_batch.second.task # Will only differ from learn_batch.first.task if transition was terminal, thus q_next_target is not used
+                    learn_batch.next_obs, 
+                    learn_batch.task # Actual task for next obs will only differ from stored task if transition was terminal, in which case q_next_target is not used anyways
                 )  # (batch_size, num_actions)
                 q_next_target = jnp.max(q_next_target, axis=-1)  # (batch_size,) # type: ignore
                 target = (
-                    learn_batch.first.reward
-                    + (1 - learn_batch.first.done) * config["GAMMA"] * q_next_target
+                    learn_batch.reward
+                    + (1 - learn_batch.done) * config["GAMMA"] * q_next_target
                 )
 
                 def _loss_fn(params):
                     q_vals = network.apply(
                         params, 
-                        learn_batch.first.obs, 
-                        learn_batch.first.task
+                        learn_batch.obs, 
+                        learn_batch.task
                     )  # (batch_size, num_actions)
                     chosen_action_qvals = jnp.take_along_axis(
                         q_vals, # type: ignore
-                        jnp.expand_dims(learn_batch.first.action, axis=-1),
+                        jnp.expand_dims(learn_batch.action, axis=-1),
                         axis=-1,
                     ).squeeze(axis=-1)
                     return jnp.mean((chosen_action_qvals - target) ** 2)
@@ -288,20 +346,34 @@ def make_train(config):
                 "timesteps": train_state.timesteps,
                 "updates": train_state.n_updates,
                 "loss": loss.mean(),
-                "returns": info["returned_episode_returns"].mean(),
+                "undiscounted_returns": info["returned_episode_returns"].mean(),
+                "task": info["returned_episode_tasks"][0] # only works for single env (no parallelization)
             }
-
             # report on wandb if required
-            if config.get("WANDB_MODE", "disabled") == "online":
-
+            wandb_mode = config.get("WANDB_MODE", "disabled")
+            if wandb_mode == "online":
                 def callback(metrics):
                     if metrics["timesteps"] % 100 == 0:
                         wandb.log(metrics)
 
                 jax.debug.callback(callback, metrics)
+            
+            if config['PRINT_METRICS'] == True:
+                def print_callback(metrics):
+                    if metrics["timesteps"] % 500 == 0:
+                        jax.debug.print(
+                            "timesteps: {timesteps}, updates: {updates}, loss: {loss:.4f}, undiscounted_returns: {undiscounted_returns:.4f}, task: {task}",
+                            timesteps=metrics["timesteps"],
+                            updates=metrics["updates"],
+                            loss=metrics["loss"],
+                            undiscounted_returns=metrics["undiscounted_returns"],
+                            task=metrics["task"]
+                        )
+                jax.debug.callback(print_callback, metrics)
 
             runner_state = (train_state, buffer_state, env_state, obs, rng)
 
+            
             return runner_state, metrics
 
         # train
@@ -322,33 +394,36 @@ def main():
         "NUM_ENVS": 1,
         "BUFFER_SIZE": 10000,
         "BUFFER_BATCH_SIZE": 32,
-        "TOTAL_TIMESTEPS": 3e5, #5e5,
+        "TOTAL_TIMESTEPS": 15e4, #5e5,
         "EPSILON_START": 0.1, # EPSILON_START==EPSILON_FINISH -> no annealing
         "EPSILON_FINISH": 0.1,
         "EPSILON_ANNEAL_TIME": 1e4,
         "TARGET_UPDATE_INTERVAL": 64,
         "LR": 2.5e-4,
         "LEARNING_STARTS": 1000,
-        "TRAINING_INTERVAL": 10,
+        "TRAINING_INTERVAL": 1,
         "N_FEATURES_PER_TASK": 32,
         "N_SHARED_EXPAND": 128,
         "N_SHARED_BOTTLENECK": 8,
+        "N_FEATURES_CONV1": 32,
+        "N_FEATURES_CONV2": 16,
         "LR_LINEAR_DECAY": False,
         "GAMMA": 0.99,
         "TAU": 1.0,
-        "ENV_NAME": "CartPole-v1",
+        "ENV_NAME": "TwoRoomsMultiTask",
         "SEED": [0],
-        "NUM_ENVS_PER_SEED": 1,
+        "NUM_ENVS_PER_SEED": 1, # Must be set to 1, handling of truncation fails otherwise (entire batch is currently ignored if any transitions result in truncation)
         "WANDB_MODE": "disabled",  # set to online to activate wandb
         "ENTITY": "odiamond-personal",
         "PROJECT": "feature-attainment-purejaxrl",
+        "PRINT_METRICS": True,  # set to False to disable printing metrics
     }
 
     seeds = copy.deepcopy(config["SEED"])
 
     for seed in seeds:
         config["SEED"] = seed
-        current_time = datetime.datetime.now().strftime("%y-%d-%H-%M")
+        current_time = datetime.datetime.now().strftime("%y-%d-%H-%M-%S")
         wandb.init(
             entity=config["ENTITY"],
             project=config["PROJECT"],

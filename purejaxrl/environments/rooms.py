@@ -23,9 +23,9 @@ class EnvState(environment.EnvState):
 
 @struct.dataclass
 class EnvParams(environment.EnvParams):
-    goal_loc: jax.Array = dataclasses.field(default_factory=lambda: jnp.array([0, +4]))
+    goal_loc: jax.Array = dataclasses.field(default_factory=lambda: jnp.array([0, 4]))
     start_loc: jax.Array = dataclasses.field(default_factory=lambda: jnp.array([0, 0]))
-    hallway_locs: jax.Array = dataclasses.field(default_factory=lambda: jnp.array([[+2, +2]])) # jnp.array([[0, 2], [2, 2], [4, 2]]))
+    hallway_locs: jax.Array = dataclasses.field(default_factory=lambda: jnp.array([[0, 2], [2, 2], [4, 2]])) # jnp.array([[0, 2], [2, 2], [4, 2]]))
     max_steps_in_episode: int = 500
     # N: int = 5
     
@@ -36,16 +36,12 @@ class TwoRooms(environment.Environment[EnvState, EnvParams]):
     ):
         super().__init__()
         self.directions = jnp.array([[-1, 0], [0, 1], [1, 0], [0, -1]])
-        self.N = 5
+        self.N = 15
 
     @property
     def default_params(self) -> EnvParams:
         # Default environment parameters
-        return EnvParams(
-            goal_loc=jnp.array([0, +4]), 
-            start_loc=jnp.array([0, 0]),
-            hallway_locs=jnp.array([[+2, +2]])
-        )
+        return EnvParams()
 
     def step_env(
         self,
@@ -59,7 +55,8 @@ class TwoRooms(environment.Environment[EnvState, EnvParams]):
         agent_loc_new = jnp.clip(
             state.agent_loc + self.directions[action], 0, self.N - 1
         )
-        on_obstacle = (agent_loc_new[1] == state.hallway_loc[1]) and (
+        on_obstacle = jnp.logical_and(
+            agent_loc_new[1] == state.hallway_loc[1],
             agent_loc_new[0] != state.hallway_loc[0]
         )
         agent_loc_new = jax.lax.select(
@@ -78,13 +75,14 @@ class TwoRooms(environment.Environment[EnvState, EnvParams]):
         )
 
         done = self.is_terminal(state, params)
+        truncated = self.is_truncated(state, params)
 
         return (
             jax.lax.stop_gradient(self.get_obs(state, params=params)),
             jax.lax.stop_gradient(state),
             reward,
             done,
-            {}
+            {"truncated": truncated}
         )
 
     def reset_env(
@@ -106,14 +104,21 @@ class TwoRooms(environment.Environment[EnvState, EnvParams]):
         return self.get_obs(state, params), state
 
     def is_terminal(self, state: EnvState, params: EnvParams) -> jax.Array:
-        """Check whether state is terminal."""
+        """Check whether goal state or episode timeout is reached."""
         # Check number of steps in episode termination condition
-        done_steps = state.time >= params.max_steps_in_episode
+        done_steps = self.is_truncated(state, params)
         # Check if agent has found the goal
         done_goal = jnp.array_equal(state.agent_loc, params.goal_loc)
         
         done = jnp.logical_or(done_goal, done_steps)
         return done
+
+    def is_truncated(self, state: EnvState, params: EnvParams) -> jax.Array:
+        """Check whether episode timeout is reached."""
+        # Check number of steps in episode termination condition
+        done_steps = state.time >= params.max_steps_in_episode
+        
+        return jnp.array(done_steps)
 
     def get_obs(
         self,

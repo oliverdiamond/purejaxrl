@@ -20,7 +20,6 @@ import gymnax
 import flashbax as fbx
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
-import numpy as np
 
 from environments.rooms import TwoRooms
 from environments.rooms import EnvState as TwoRoomsEnvState
@@ -349,8 +348,17 @@ def plot_qvals(network_params, rng):
         
         all_q_values[hallway_idx] = q_values_grid
     
-    # Create visualization
-    fig, axes = plt.subplots(1, num_hallways, figsize=(6 * num_hallways, 6))
+    # Create visualization with dynamic sizing
+    # Scale figure size and font sizes based on grid size
+    base_fig_size = max(8, N * 0.5)  # Minimum 8, grows with grid size
+    fig_size = min(base_fig_size, 20)  # Cap at 20 to avoid huge figures
+    
+    # Dynamic font sizes based on grid size
+    q_value_fontsize = max(4, min(12, 60 / N))  # Scale inversely with grid size
+    label_fontsize = max(8, min(24, 120 / N))   # For S and G labels
+    edge_linewidth = max(0.3, min(1.0, 8 / N)) # Thinner lines for larger grids
+    
+    fig, axes = plt.subplots(1, num_hallways, figsize=(fig_size * num_hallways, fig_size))
     if num_hallways == 1:
         axes = [axes]
     
@@ -388,13 +396,16 @@ def plot_qvals(network_params, rng):
                 if is_wall:
                     # Draw wall as black square
                     rect = patches.Rectangle((col, plot_row), 1, 1, 
-                                            linewidth=1, edgecolor='black', facecolor='black')
+                                            linewidth=edge_linewidth, edgecolor='black', facecolor='black')
                     ax.add_patch(rect)
                 elif is_goal:
                     # Draw goal as green square
                     rect = patches.Rectangle((col, plot_row), 1, 1, 
-                                            linewidth=1, edgecolor='black', facecolor='green')
+                                            linewidth=edge_linewidth, edgecolor='black', facecolor='green')
                     ax.add_patch(rect)
+                    ax.text(col+0.5, plot_row+0.5, f'G', 
+                                                    ha='center', va='center', fontsize=label_fontsize, 
+                                                    color='white', weight='bold')
                 else:
                     # Valid agent location - draw Q-value triangles
                     q_vals = q_values_grid[row, col]
@@ -402,10 +413,10 @@ def plot_qvals(network_params, rng):
                     # Define triangle vertices for each action
                     # up, right, down, left
                     triangles = [
-                        [(col + 0.5, plot_row + 1), (col, plot_row + 0.5), (col + 1, plot_row + 0.5)],  # up
-                        [(col + 0.5, plot_row + 1), (col + 1, plot_row + 0.5), (col + 0.5, plot_row)],    # right
-                        [(col + 0.5, plot_row), (col, plot_row + 0.5), (col + 1, plot_row + 0.5)],      # down
-                        [(col + 0.5, plot_row + 1), (col, plot_row + 0.5), (col + 0.5, plot_row)]       # left
+                        [(col, plot_row + 1), (col + 1, plot_row + 1), (col + 0.5, plot_row + 0.5)],  # up
+                        [(col + 1, plot_row + 1), (col + 1, plot_row), (col + 0.5, plot_row + 0.5)],    # right
+                        [(col + 1, plot_row), (col, plot_row), (col + 0.5, plot_row + 0.5)],      # down
+                        [(col, plot_row), (col, plot_row + 1), (col + 0.5, plot_row + 0.5)]       # left
                     ]
                     
                     for action_idx, (q_val, triangle_verts) in enumerate(zip(q_vals, triangles)):
@@ -414,35 +425,58 @@ def plot_qvals(network_params, rng):
                         color_intensity = float(max(0.1, min(1.0, intensity)))  # Clamp between 0.1 and 1.0
                         
                         triangle = patches.Polygon(triangle_verts, closed=True,
-                                                    facecolor=(color_intensity, 0, 0, 0.8),
-                                                    edgecolor='black', linewidth=0.5)
+                                                    facecolor=(0, 0, color_intensity, 0.8),
+                                                    edgecolor='black', linewidth=edge_linewidth * 0.5)
                         ax.add_patch(triangle)
                         
                         # Add Q-value text in triangle center
                         center_x = sum(v[0] for v in triangle_verts) / 3
                         center_y = sum(v[1] for v in triangle_verts) / 3
-                        ax.text(center_x, center_y, f'{float(q_val):.2f}', 
-                                ha='center', va='center', fontsize=8, 
-                                color='white' if color_intensity > 0.5 else 'black')
+                        
+                        # Format Q-value text based on magnitude for better readability
+                        if abs(q_val) >= 100:
+                            q_text = f'{float(q_val):.0f}'
+                        elif abs(q_val) >= 10:
+                            q_text = f'{float(q_val):.1f}'
+                        else:
+                            q_text = f'{float(q_val):.2f}'
+                            
+                        ax.text(center_x, center_y, q_text, 
+                                ha='center', va='center', fontsize=q_value_fontsize, 
+                                color='white', weight='bold')
                 
+                if jnp.array_equal(agent_loc, env_params.start_loc):
+                    # Draw S at start location
+                    ax.text(col + 0.5, plot_row + 0.5, 'S', 
+                            ha='center', va='center', fontsize=label_fontsize, 
+                            color='white', weight='bold')
                 # Draw grid lines
                 rect = patches.Rectangle((col, plot_row), 1, 1, 
-                                        linewidth=1, edgecolor='black', facecolor='none')
+                                        linewidth=edge_linewidth, edgecolor='black', facecolor='none')
                 ax.add_patch(rect)
         
         ax.set_xlim(0, N)
         ax.set_ylim(0, N)
         ax.set_aspect('equal')
-        ax.set_title(f'Q-values for Hallway at {hallway_loc}')
-        ax.set_xticks(range(N + 1))
-        ax.set_yticks(range(N + 1))
-        ax.grid(True, alpha=0.3)
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.set_xticklabels([])
+        ax.set_yticklabels([])
+        title_fontsize = max(10, min(16, 100 / N))  # Dynamic title font size
+        ax.set_title(f'Action Values with Hallway at ({hallway_loc[0]}, {hallway_loc[1]})', 
+                     fontsize=title_fontsize)
+        
+        # # Adjust tick spacing for larger grids to avoid clutter
+        # tick_spacing = max(1, N // 10)  # Show fewer ticks for large grids
+        # ax.set_xticks(range(0, N + 1, tick_spacing))
+        # ax.set_yticks(range(0, N + 1, tick_spacing))
+        ax.grid(True, alpha=0.3, linewidth=edge_linewidth * 0.5)
     
     plt.tight_layout()
-    plt.savefig('q_values_visualization.png', dpi=300, bbox_inches='tight')
+    plt.savefig(f'purejaxrl/plots/dqn_q_values_N={N}.png', dpi=300, bbox_inches='tight')
     
-    print(f"Q-values visualization saved as 'q_values_visualization.png'")
-    print(f"Analyzed {num_hallways} hallway configuration(s)")
+    print(f"Q-values visualization saved as 'q_values_N={N}.png'")
+    print(f"Analyzed {num_hallways} hallway configuration(s) for {N}x{N} grid")
 
 def main():
 
@@ -450,12 +484,12 @@ def main():
         "NUM_ENVS": 1,
         "BUFFER_SIZE": 10000,
         "BUFFER_BATCH_SIZE": 32,
-        "TOTAL_TIMESTEPS": 2000, # 1e5,
+        "TOTAL_TIMESTEPS": 10000, # 1e5,
         "EPSILON_START": 0.1,
         "EPSILON_FINISH": 0.1,
-        "EPSILON_ANNEAL_TIME": 1e4,
+        "EPSILON_ANNEAL_TIME": 1000,
         "TARGET_UPDATE_INTERVAL": 64,
-        "LR": 2.5e-4,
+        "LR": 0.00025,
         "LEARNING_STARTS": 1000,
         "TRAINING_INTERVAL": 1,
         "LR_LINEAR_DECAY": False,

@@ -23,9 +23,9 @@ class EnvState(environment.EnvState):
 
 @struct.dataclass
 class EnvParams(environment.EnvParams):
-    goal_loc: jax.Array = dataclasses.field(default_factory=lambda: jnp.array([0, 4]))
+    goal_loc: jax.Array = dataclasses.field(default_factory=lambda: jnp.array([0, 8]))
     start_loc: jax.Array = dataclasses.field(default_factory=lambda: jnp.array([0, 0]))
-    hallway_locs: jax.Array = dataclasses.field(default_factory=lambda: jnp.array([[2, 2]])) # jnp.array([[0, 2], [2, 2], [4, 2]]))
+    hallway_locs: jax.Array = dataclasses.field(default_factory=lambda: jnp.array([[4, 4]])) # jnp.array([[0, 2], [2, 2], [4, 2]]))
     max_steps_in_episode: int = 500
     # N: int = 5
     
@@ -37,7 +37,7 @@ class TwoRooms(environment.Environment[EnvState, EnvParams]):
         super().__init__()
         self.directions = jnp.array([[-1, 0], [0, 1], [1, 0], [0, -1]])
         self.directions_str = ["up", "right", "down", "left"]
-        self.N = 5
+        self.N = 9
 
     @property
     def default_params(self) -> EnvParams:
@@ -189,3 +189,37 @@ class TwoRooms(environment.Environment[EnvState, EnvParams]):
                 "time": spaces.Discrete(params.max_steps_in_episode),
             }
         )
+
+class TwoRooms5(TwoRooms):
+    """Two Rooms environment with 5x5 grid."""
+    
+    def __init__(self):
+        super().__init__()
+        self.N = 5
+
+    @property
+    def default_params(self) -> EnvParams:
+        # Default environment parameters
+        return EnvParams(
+            max_steps_in_episode=500,
+            goal_loc=jnp.array([0, 4]),
+            start_loc=jnp.array([0, 0]),
+            hallway_locs=jnp.array([[2, 2]]),
+        )
+
+class TwoRooms15(TwoRooms):
+    """Two Rooms environment with 5x5 grid."""
+    
+    def __init__(self):
+        super().__init__()
+        self.N = 15
+
+    @property
+    def default_params(self) -> EnvParams:
+        # Default environment parameters
+        return EnvParams(
+            max_steps_in_episode=500,
+            goal_loc=jnp.array([0, 14]),
+            start_loc=jnp.array([0, 0]),
+            hallway_locs=jnp.array([[7, 7]])
+            )

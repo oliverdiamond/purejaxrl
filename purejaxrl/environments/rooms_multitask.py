@@ -26,9 +26,9 @@ class EnvState(environment.EnvState):
 class EnvParams(environment.EnvParams):
     n_tasks: int = 3
     max_steps_in_episode: int = 500
-    goal_loc: jax.Array = field(default_factory=lambda: jnp.array([0, 4]))
+    goal_loc: jax.Array = field(default_factory=lambda: jnp.array([0, 8]))
     start_loc: jax.Array = field(default_factory=lambda: jnp.array([0, 0]))
-    hallway_locs: jax.Array = field(default_factory=lambda: jnp.array([[0, 2], [2, 2], [4, 2]]))
+    hallway_locs: jax.Array = field(default_factory=lambda: jnp.array([[0, 4], [4, 4], [8, 4]]))
 
 
 class TwoRoomsMultiTask(environment.Environment[EnvState, EnvParams]):
@@ -194,3 +194,37 @@ class TwoRoomsMultiTask(environment.Environment[EnvState, EnvParams]):
                 "task": spaces.Discrete(params.n_tasks),
             }
         )
+
+class TwoRoomsMultiTask5(TwoRoomsMultiTask):
+    """Two Rooms environment with 5x5 grid."""
+    
+    def __init__(self):
+        super().__init__()
+        self.N = 5
+
+    @property
+    def default_params(self) -> EnvParams:
+        # Default environment parameters
+        return EnvParams(
+            max_steps_in_episode=500,
+            goal_loc=jnp.array([0, 4]),
+            start_loc=jnp.array([0, 0]),
+            hallway_locs=jnp.array([[0, 2], [2, 2], [4, 2]]),
+        )
+
+class TwoRoomsMultiTask15(TwoRoomsMultiTask):
+    """Two Rooms environment with 5x5 grid."""
+    
+    def __init__(self):
+        super().__init__()
+        self.N = 15
+
+    @property
+    def default_params(self) -> EnvParams:
+        # Default environment parameters
+        return EnvParams(
+            max_steps_in_episode=500,
+            goal_loc=jnp.array([0, 14]),
+            start_loc=jnp.array([0, 0]),
+            hallway_locs=jnp.array([[0,7], [7, 7], [14, 7]])
+            )

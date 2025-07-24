@@ -1,33 +1,10 @@
 import jax.numpy as jnp
+import jax
 
-data = jnp.array([
-    [
-    [10, 11, 12, 13],
-    [20, 21, 22, 23],
-    [30, 31, 32, 33],
-    [130, 131, 132, 133]
-    ], 
-    [
-    [40, 41, 42, 43],
-    [50, 51, 52, 53],
-    [60, 61, 62, 63],
-    [161, 162, 163, 164]
-    ],
-    [
-    [70, 71, 72, 73],
-    [80, 81, 82, 83],
-    [90, 91, 92, 93],
-    [190, 191, 192, 193],
-    ],
-    [
-    [100, 101, 102, 103],
-    [110, 111, 112, 113],
-    [120, 121, 122, 123],
-    [130, 131, 132, 133]
-    ]
-    ])
+@jax.jit
+def test_function(x):
+    """A simple test function to demonstrate JIT compilation."""
+    j = jnp.sin(x)
+    return jnp.sin(x) + jnp.cos(x)
 
-tasks = jnp.array([0, 2, 3, 3])
-batch_indices = jnp.arange(4)
-selected_outputs = data[tasks, batch_indices]
-print(selected_outputs)
+test_function(jnp.array([2]))

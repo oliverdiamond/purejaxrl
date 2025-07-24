@@ -73,13 +73,20 @@ class MultiTaskMazeQNetwork(nn.Module):
             features=self.n_features_conv2, kernel_size=(4, 4), strides=(2, 2), padding=[(2, 2), (2, 2)],
             kernel_init=w_conv_init, name="conv2"
         )
+        self.conv_backbone = nn.Sequential([
+            self.conv1,
+            nn.relu,
+            self.conv2,
+            nn.relu
+        ], name="conv_backbone")
 
-        # Shared representation layers
-        self.shared_rep_expand = nn.Dense(self.n_shared_expand, kernel_init=w_init, name="shared_rep_expand")
-        self.shared_rep_bottleneck = nn.Dense(self.n_shared_bottleneck, kernel_init=w_init, name="shared_rep_bottleneck")
+        self.shared_rep = nn.Sequential([
+            nn.Dense(self.n_shared_expand, kernel_init=w_init, name="shared_rep_expand"),
+            nn.Dense(self.n_shared_bottleneck, kernel_init=w_init, name="shared_rep_bottleneck"),
+            nn.relu
+        ], name="shared_rep")
 
         # Task-specific networks
-        # TODO Figure out how to do this with one TaskNets func and pass multiple methods
         self.TaskNets = nn.vmap(
             TaskNet,
             variable_axes={'params': 0},
@@ -87,54 +94,42 @@ class MultiTaskMazeQNetwork(nn.Module):
             in_axes=(None, None),
             out_axes=0,
             axis_size=self.n_tasks,
-        )
-
-    def get_common_representation(self, x: jnp.ndarray):
-        x = self.conv1(x)
-        x = nn.relu(x)
-        x = self.conv2(x)
-        x = nn.relu(x)
-        return x.reshape((x.shape[0], -1))  # Flatten
+            methods=['__call__', 'get_activations']
+        )(self.action_dim, self.n_features_per_task, name="TaskNets")
 
     def __call__(self, x: jnp.ndarray, task: jnp.ndarray):
-
-        # Conv Backbone
-        x = nn.Conv(
-            features=self.n_features_conv1, kernel_size=(4, 4), strides=(1, 1), padding=[(1, 1), (1, 1)],
-            kernel_init=w_conv_init, name="conv1"
-        )(x)
-        x = nn.relu(x)
-        x = nn.Conv(
-            features=self.n_features_conv2, kernel_size=(4, 4), strides=(2, 2), padding=[(2, 2), (2, 2)],
-            kernel_init=w_conv_init, name="conv2"
-        )(x)
-        x = nn.relu(x)
-        x = x.reshape((x.shape[0], -1))  # Flatten
+        # Apply the convolutional backbone
+        x = self.conv_backbone(x)
+        x = x.reshape((x.shape[0], -1))  # Flatten the output
 
         # Shared representation layer
-        shared_rep = nn.Sequential([
-            nn.Dense(self.n_shared_expand, kernel_init=w_init, name="shared_rep_expand"),
-            nn.Dense(self.n_shared_bottleneck, kernel_init=w_init, name="shared_rep_bottleneck"),
-        ], name="shared_rep")(x)
-        shared_rep = nn.relu(shared_rep)
+        shared_rep = self.shared_rep(x)
 
-        # Task-specific representations and heads
-        TaskNets = nn.vmap(
-            TaskNet,
-            variable_axes={'params': 0},
-            split_rngs={'params': True},
-            in_axes=(None, None), # type: ignore
-            out_axes=0,
-            axis_size=self.n_tasks
-        )
-        outputs = TaskNets(
-            self.action_dim, 
-            self.n_features_per_task, 
-            name="TaskNets")(x, shared_rep)
+        # Task-specific outputs
+        q_vals = self.TaskNets(x, shared_rep)
         batch_indices = jnp.arange(x.shape[0])
-        selected_outputs = outputs[task, batch_indices]
+        selected_outputs = q_vals[task, batch_indices]
 
         return selected_outputs
+
+    def get_activations(self, x: jnp.ndarray) -> dict[str, jnp.ndarray]:
+        """Returns intermediate activations."""
+        # Conv Backbone
+        x = self.conv_backbone(x)
+        x = x.reshape((x.shape[0], -1))  # Flatten the output
+        # Shared representation layer
+        shared_rep = self.shared_rep(x)
+        # Task-specific representations and heads
+        task_data = self.TaskNets.get_activations(x, shared_rep)
+
+        task_reps = task_data["task_rep"]
+        q_vals = task_data["q_values"]
+        
+        return {
+            "shared_rep": shared_rep,
+            "task_rep": task_reps,
+            "q_values": q_vals
+        }
 
 
 @chex.dataclass(frozen=True)
@@ -383,6 +378,25 @@ def make_train(config):
         runner_state, metrics = jax.lax.scan(
             _update_step, runner_state, None, config["NUM_UPDATES"]
         )
+        
+        def forward_pass_callback(params):
+            """Performs a forward pass with final params and a dummy observation."""
+            print("\n--- Running forward pass on final parameters ---")
+            # Create a dummy observation and task, similar to initialization
+            dummy_obs = jnp.zeros((1,) + env.observation_space(env_params).shape)
+            dummy_task = jnp.zeros((1,), dtype=jnp.int32)
+            
+            # Perform the forward pass using the network from the outer scope
+            q_values = network.apply(params, dummy_obs, dummy_task)
+            
+            print(f"Q-values for dummy observation (task {dummy_task[0]}): {q_values}")
+
+        # This callback will be executed after the scan (training) is complete,
+        # receiving the final parameters from the runner_state.
+        jax.debug.callback(forward_pass_callback, runner_state[0].params)
+            
+
+        
         return {"runner_state": runner_state, "metrics": metrics}
 
     return train
@@ -394,7 +408,7 @@ def main():
         "NUM_ENVS": 1,
         "BUFFER_SIZE": 10000,
         "BUFFER_BATCH_SIZE": 32,
-        "TOTAL_TIMESTEPS": 15e4, #5e5,
+        "TOTAL_TIMESTEPS": 2000, # 15e4, #5e5,
         "EPSILON_START": 0.1, # EPSILON_START==EPSILON_FINISH -> no annealing
         "EPSILON_FINISH": 0.1,
         "EPSILON_ANNEAL_TIME": 1e4,
@@ -416,7 +430,7 @@ def main():
         "WANDB_MODE": "disabled",  # set to online to activate wandb
         "ENTITY": "odiamond-personal",
         "PROJECT": "feature-attainment-purejaxrl",
-        "PRINT_METRICS": True,  # set to False to disable printing metrics
+        "PRINT_METRICS": False,  # set to False to disable printing metrics
     }
 
     seeds = copy.deepcopy(config["SEED"])

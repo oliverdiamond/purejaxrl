@@ -25,7 +25,7 @@ class EnvState(environment.EnvState):
 class EnvParams(environment.EnvParams):
     goal_loc: jax.Array = dataclasses.field(default_factory=lambda: jnp.array([0, 4]))
     start_loc: jax.Array = dataclasses.field(default_factory=lambda: jnp.array([0, 0]))
-    hallway_locs: jax.Array = dataclasses.field(default_factory=lambda: jnp.array([[0, 2], [2, 2], [4, 2]])) # jnp.array([[0, 2], [2, 2], [4, 2]]))
+    hallway_locs: jax.Array = dataclasses.field(default_factory=lambda: jnp.array([[2, 2]])) # jnp.array([[0, 2], [2, 2], [4, 2]]))
     max_steps_in_episode: int = 500
     # N: int = 5
     
@@ -36,7 +36,8 @@ class TwoRooms(environment.Environment[EnvState, EnvParams]):
     ):
         super().__init__()
         self.directions = jnp.array([[-1, 0], [0, 1], [1, 0], [0, -1]])
-        self.N = 15
+        self.directions_str = ["up", "right", "down", "left"]
+        self.N = 5
 
     @property
     def default_params(self) -> EnvParams:

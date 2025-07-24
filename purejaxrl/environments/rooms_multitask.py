@@ -26,7 +26,6 @@ class EnvState(environment.EnvState):
 class EnvParams(environment.EnvParams):
     n_tasks: int = 3
     max_steps_in_episode: int = 500
-    N: int = 5
     goal_loc: jax.Array = field(default_factory=lambda: jnp.array([0, 4]))
     start_loc: jax.Array = field(default_factory=lambda: jnp.array([0, 0]))
     hallway_locs: jax.Array = field(default_factory=lambda: jnp.array([[0, 2], [2, 2], [4, 2]]))
@@ -38,7 +37,9 @@ class TwoRoomsMultiTask(environment.Environment[EnvState, EnvParams]):
     ):
         super().__init__()
         self.directions = jnp.array([[-1, 0], [0, 1], [1, 0], [0, -1]])
+        self.directions_str = ["up", "right", "down", "left"]
         self.N: int = 5  # Hardcoded for now, could be parameterized later
+        # TODO Hardcode start loc, goal loc and initalize hallway_locs based on N
 
 
     @property

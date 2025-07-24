@@ -18,7 +18,12 @@ from flax.linen.initializers import variance_scaling
 from wrappers import LogWrapper, FlattenObservationWrapper
 import gymnax
 import flashbax as fbx
+import matplotlib.pyplot as plt
+import matplotlib.patches as patches
+import numpy as np
+
 from environments.rooms import TwoRooms
+from environments.rooms import EnvState as TwoRoomsEnvState
 
 class MazeQNetwork(nn.Module):
     action_dim: int
@@ -288,10 +293,156 @@ def make_train(config):
         runner_state, metrics = jax.lax.scan(
             _update_step, runner_state, None, config["NUM_UPDATES"]
         )
+        
         return {"runner_state": runner_state, "metrics": metrics}
 
     return train
 
+
+def plot_qvals(network_params, rng):
+    """Performs a forward pass with final params and visualizes Q-values for all hallway locations."""
+    basic_env = TwoRooms()
+    env_params = basic_env.default_params
+    network = MazeQNetwork(action_dim=basic_env.action_space(env_params).n)
+    rng, _rng = jax.random.split(rng)
+    init_x = jnp.zeros((1,) + basic_env.observation_space(env_params).shape) # Conv layers need extra dimension for batch size
+    _ = network.init(_rng, init_x)
+    # Get grid dimensions
+    N = basic_env.N
+    num_hallways = env_params.hallway_locs.shape[0]
+    
+    
+    # Store Q-values for all (hallway, agent_location) pairs
+    all_q_values = {}
+    
+    # Outer loop: iterate over all hallway locations
+    for hallway_idx in range(num_hallways):
+        hallway_loc = env_params.hallway_locs[hallway_idx]
+        q_values_grid = jnp.zeros((N, N, 4))  # 4 actions: up, right, down, left
+        
+        # Inner loop: iterate over each location in the grid
+        for row in range(N):
+            for col in range(N):
+                agent_loc = jnp.array([row, col])
+                
+                # Check if this is a valid location for the agent
+                # 1. Not a wall location
+                # 2. Not the goal location
+                is_wall = (col == hallway_loc[1] and row != hallway_loc[0])
+                is_goal = jnp.array_equal(agent_loc, env_params.goal_loc)
+                
+                if not is_wall and not is_goal:
+                    # Create new state with current agent location
+                    current_state = TwoRoomsEnvState(
+                        time=0,
+                        hallway_loc=hallway_loc,
+                        agent_loc=agent_loc
+                    )
+                    
+                    # Generate observation for this state
+                    obs = basic_env.get_obs(current_state, params=env_params)
+                    obs_batch = jnp.expand_dims(obs, 0) # Add batch dimension
+                    
+                    # Forward pass through network
+                    q_vals = network.apply(network_params, obs_batch)
+                    q_values_grid = q_values_grid.at[row, col].set(q_vals[0])
+        
+        all_q_values[hallway_idx] = q_values_grid
+    
+    # Create visualization
+    fig, axes = plt.subplots(1, num_hallways, figsize=(6 * num_hallways, 6))
+    if num_hallways == 1:
+        axes = [axes]
+    
+    for hallway_idx in range(num_hallways):
+        ax = axes[hallway_idx]
+        hallway_loc = env_params.hallway_locs[hallway_idx]
+        q_values_grid = all_q_values[hallway_idx]
+        
+        # Normalize Q-values for color mapping
+        valid_q_values = []
+        for row in range(N):
+            for col in range(N):
+                agent_loc = jnp.array([row, col])
+                is_wall = (col == hallway_loc[1] and row != hallway_loc[0])
+                is_goal = jnp.array_equal(agent_loc, env_params.goal_loc)
+                if not is_wall and not is_goal:
+                    valid_q_values.extend(q_values_grid[row, col])
+        
+        if valid_q_values:
+            q_min, q_max = min(valid_q_values), max(valid_q_values)
+            q_range = q_max - q_min if q_max > q_min else 1.0
+        else:
+            q_min, q_max, q_range = 0, 1, 1
+        
+        # Draw the grid
+        for row in range(N):
+            for col in range(N):
+                agent_loc = jnp.array([row, col])
+                is_wall = (col == hallway_loc[1] and row != hallway_loc[0])
+                is_goal = jnp.array_equal(agent_loc, env_params.goal_loc)
+                
+                # Flip row for plotting (matplotlib uses bottom-left origin)
+                plot_row = N - 1 - row
+                
+                if is_wall:
+                    # Draw wall as black square
+                    rect = patches.Rectangle((col, plot_row), 1, 1, 
+                                            linewidth=1, edgecolor='black', facecolor='black')
+                    ax.add_patch(rect)
+                elif is_goal:
+                    # Draw goal as green square
+                    rect = patches.Rectangle((col, plot_row), 1, 1, 
+                                            linewidth=1, edgecolor='black', facecolor='green')
+                    ax.add_patch(rect)
+                else:
+                    # Valid agent location - draw Q-value triangles
+                    q_vals = q_values_grid[row, col]
+                    
+                    # Define triangle vertices for each action
+                    # up, right, down, left
+                    triangles = [
+                        [(col + 0.5, plot_row + 1), (col, plot_row + 0.5), (col + 1, plot_row + 0.5)],  # up
+                        [(col + 0.5, plot_row + 1), (col + 1, plot_row + 0.5), (col + 0.5, plot_row)],    # right
+                        [(col + 0.5, plot_row), (col, plot_row + 0.5), (col + 1, plot_row + 0.5)],      # down
+                        [(col + 0.5, plot_row + 1), (col, plot_row + 0.5), (col + 0.5, plot_row)]       # left
+                    ]
+                    
+                    for action_idx, (q_val, triangle_verts) in enumerate(zip(q_vals, triangles)):
+                        # Normalize Q-value for color intensity
+                        intensity = (q_val - q_min) / q_range if q_range > 0 else 0.5
+                        color_intensity = float(max(0.1, min(1.0, intensity)))  # Clamp between 0.1 and 1.0
+                        
+                        triangle = patches.Polygon(triangle_verts, closed=True,
+                                                    facecolor=(color_intensity, 0, 0, 0.8),
+                                                    edgecolor='black', linewidth=0.5)
+                        ax.add_patch(triangle)
+                        
+                        # Add Q-value text in triangle center
+                        center_x = sum(v[0] for v in triangle_verts) / 3
+                        center_y = sum(v[1] for v in triangle_verts) / 3
+                        ax.text(center_x, center_y, f'{float(q_val):.2f}', 
+                                ha='center', va='center', fontsize=8, 
+                                color='white' if color_intensity > 0.5 else 'black')
+                
+                # Draw grid lines
+                rect = patches.Rectangle((col, plot_row), 1, 1, 
+                                        linewidth=1, edgecolor='black', facecolor='none')
+                ax.add_patch(rect)
+        
+        ax.set_xlim(0, N)
+        ax.set_ylim(0, N)
+        ax.set_aspect('equal')
+        ax.set_title(f'Q-values for Hallway at {hallway_loc}')
+        ax.set_xticks(range(N + 1))
+        ax.set_yticks(range(N + 1))
+        ax.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig('q_values_visualization.png', dpi=300, bbox_inches='tight')
+    
+    print(f"Q-values visualization saved as 'q_values_visualization.png'")
+    print(f"Analyzed {num_hallways} hallway configuration(s)")
 
 def main():
 
@@ -299,7 +450,7 @@ def main():
         "NUM_ENVS": 1,
         "BUFFER_SIZE": 10000,
         "BUFFER_BATCH_SIZE": 32,
-        "TOTAL_TIMESTEPS": 1e5,
+        "TOTAL_TIMESTEPS": 2000, # 1e5,
         "EPSILON_START": 0.1,
         "EPSILON_FINISH": 0.1,
         "EPSILON_ANNEAL_TIME": 1e4,
@@ -335,7 +486,11 @@ def main():
     rngs = jax.random.split(rng, config["NUM_SEEDS"])
     train_vjit = jax.jit(jax.vmap(make_train(config)))
     outs = jax.block_until_ready(train_vjit(rngs))
-
+    runner_state = outs["runner_state"]
+    # This is a quick fix for now but eventually we might want to vmap the plotting over all of the seeds. 
+    # NOTE This will currently fail if we try to squeeze after runnning with more than 1 random seed
+    params = jax.tree_util.tree_map(lambda x: x.squeeze(axis=0), runner_state[0].params)
+    plot_qvals(params, rng)
 
 if __name__ == "__main__":
     main()

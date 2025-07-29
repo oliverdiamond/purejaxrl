@@ -23,6 +23,7 @@ import matplotlib.patches as patches
 
 from environments.rooms import TwoRooms
 from environments.rooms import EnvState as TwoRoomsEnvState
+from environments import make
 
 class MazeQNetwork(nn.Module):
     action_dim: int
@@ -76,8 +77,7 @@ def make_train(config):
     # basic_env, env_params = gymnax.make(config["ENV_NAME"])
     # env = FlattenObservationWrapper(basic_env)
     # env = LogWrapper(env) # type: ignore
-    basic_env = TwoRooms()
-    env_params = basic_env.default_params
+    basic_env, env_params = make(config["ENV_NAME"])
     env = LogWrapper(basic_env) # type: ignore
 
     vmap_reset = lambda n_envs: lambda rng: jax.vmap(env.reset, in_axes=(0, None))(
@@ -429,9 +429,16 @@ def plot_qvals(network_params, rng):
                                                     edgecolor='black', linewidth=edge_linewidth * 0.5)
                         ax.add_patch(triangle)
                         
-                        # Add Q-value text in triangle center
-                        center_x = sum(v[0] for v in triangle_verts) / 3
-                        center_y = sum(v[1] for v in triangle_verts) / 3
+                        # Add Q-value text in triangle center, but shift slightly towards square center
+                        triangle_center_x = sum(v[0] for v in triangle_verts) / 3
+                        triangle_center_y = sum(v[1] for v in triangle_verts) / 3
+                        square_center_x = col + 0.5
+                        square_center_y = plot_row + 0.5
+                        
+                        # Move the text 30% of the way from triangle center to square center
+                        shift_factor = 0.15
+                        center_x = triangle_center_x + shift_factor * (square_center_x - triangle_center_x)
+                        center_y = triangle_center_y + shift_factor * (square_center_y - triangle_center_y)
                         
                         # Format Q-value text based on magnitude for better readability
                         if abs(q_val) >= 100:

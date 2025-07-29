@@ -154,7 +154,7 @@ class TwoRooms(environment.Environment[EnvState, EnvParams]):
     @property
     def name(self) -> str:
         """Environment name."""
-        return "TwoRoomsMultiTask"
+        return "TwoRooms"
 
     @property
     def num_actions(self) -> int:
@@ -207,6 +207,12 @@ class TwoRooms5(TwoRooms):
             hallway_locs=jnp.array([[2, 2]]),
         )
 
+    @property
+    def name(self) -> str:
+        """Environment name."""
+        return "TwoRooms5"
+
+
 class TwoRooms15(TwoRooms):
     """Two Rooms environment with 5x5 grid."""
     
@@ -223,3 +229,8 @@ class TwoRooms15(TwoRooms):
             start_loc=jnp.array([0, 0]),
             hallway_locs=jnp.array([[7, 7]])
             )
+
+    @property
+    def name(self) -> str:
+        """Environment name."""
+        return "TwoRooms15"

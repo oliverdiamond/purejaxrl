@@ -3,10 +3,10 @@
 Streamlit GUI for visualizing neural network activations in multi-task gridworld environments.
 
 Usage:
-    streamlit run visualize_reps_easy_grid_with_task_specific_reps.py -- <filename>
+    streamlit run visualize_reps.py -- <results_directory>
 
 Example:
-    streamlit run visualize_reps_easy_grid_with_task_specific_reps.py -- activations_N=5_n_tasks=3_shared_bottleneck=8_task_features=32_conv1=32_conv2=16_seed=0.pkl
+    streamlit run visualize_reps.py -- purejaxrl/results/dqn_multitask/TwoRoomsMultiTask5/MTQNet/25-01-29-10-30-45
 """
 
 import pickle
@@ -21,23 +21,21 @@ from matplotlib.colors import LinearSegmentedColormap
 from matplotlib.figure import Figure
 
 
-def load_data(filename: str) -> Tuple[Dict, Dict]:
-    """Load activations and metadata from pickle file."""
+def load_data(results_dir: str) -> Tuple[Dict, Dict]:
+    """Load activations and metadata from results directory."""
     try:
-        # Navigate up to the project root to find the data directory
-        current_dir = os.path.dirname(os.path.abspath(__file__))
-        project_root = os.path.dirname(os.path.dirname(os.path.dirname(current_dir)))
-        data_path = os.path.join(project_root, "purejaxrl", "data", filename)
+        # Look for activations.pkl in the results directory
+        data_path = os.path.join(results_dir, "activations.pkl")
+        
+        if not os.path.exists(data_path):
+            st.error(f"activations.pkl not found in {results_dir}")
+            st.stop()
         
         with open(data_path, 'rb') as f:
             data = pickle.load(f)
         return data['activations'], data['metadata']
-    except FileNotFoundError:
-        st.error(f"File {filename} not found in data directory!")
-        st.error(f"Looking for: {data_path}")
-        st.stop()
     except Exception as e:
-        st.error(f"Error loading file: {e}")
+        st.error(f"Error loading data: {e}")
         st.stop()
 
 
@@ -76,16 +74,31 @@ def is_valid_location(row: int, col: int, grid_size: int, goal_loc: Tuple[int, i
     return not (is_wall or is_goal)
 
 
-def normalize_features(features: np.ndarray, min_val: float, max_val: float) -> np.ndarray:
-    """Normalize feature values to [0, 1] range."""
-    if max_val == min_val:
-        return np.full_like(features, 0.5)
-    return (features - min_val) / (max_val - min_val)
+def normalize_features(features: np.ndarray, min_vals: np.ndarray, max_vals: np.ndarray) -> np.ndarray:
+    """Normalize feature values to [0, 1] range using per-feature min/max values."""
+    features = np.array(features)
+    min_vals = np.array(min_vals)
+    max_vals = np.array(max_vals)
+    
+    # Handle cases where min == max for some features
+    range_vals = max_vals - min_vals
+    range_vals = np.where(range_vals == 0, 1, range_vals)  # Avoid division by zero
+    
+    normalized = (features - min_vals) / range_vals
+    # Set features with zero range to 0.5
+    normalized = np.where(max_vals == min_vals, 0.5, normalized)
+    
+    return normalized
 
 
 def create_feature_visualization(features: np.ndarray, title: str, 
-                                feature_names: Optional[List[str]] = None, compact: bool = False) -> Figure:
+                                feature_names: Optional[List[str]] = None, compact: bool = False,
+                                raw_features: Optional[np.ndarray] = None,
+                                min_vals: Optional[np.ndarray] = None,
+                                max_vals: Optional[np.ndarray] = None) -> Figure:
     """Create a horizontal bar visualization of feature activations."""
+    # Use raw features for display text, normalized features for colors
+    display_features = raw_features if raw_features is not None else features
     # Create custom colormap: blue -> white -> red
     colors = ['blue', 'white', 'red']
     n_bins = 256
@@ -105,14 +118,29 @@ def create_feature_visualization(features: np.ndarray, title: str,
         fontsize = 8
     
     # Create rectangles for each feature
-    for i, val in enumerate(features):
-        color = cmap(val)
+    for i, (norm_val, display_val) in enumerate(zip(features, display_features)):
+        # Check if this feature has zero range (constant value)
+        has_zero_range = False
+        if min_vals is not None and max_vals is not None:
+            has_zero_range = (min_vals[i] == max_vals[i])
+        
+        if has_zero_range:
+            # Use yellow color for features with zero range
+            color = 'yellow'
+        else:
+            # Use normalized value for color mapping
+            color = cmap(norm_val)
+        
         rect = patches.Rectangle((i, 0), 1, 1, facecolor=color, edgecolor='black', linewidth=0.2)
         ax.add_patch(rect)
         
-        # Add feature value text
-        text_color = 'white' if val < 0.3 or val > 0.7 else 'black'
-        ax.text(i + 0.5, 0.5, f'{val:.2f}', ha='center', va='center', 
+        # Add feature value text (display raw value)
+        # Use black text for yellow background, otherwise use original logic
+        if has_zero_range:
+            text_color = 'black'
+        else:
+            text_color = 'white' if norm_val < 0.3 or norm_val > 0.7 else 'black'
+        ax.text(i + 0.5, 0.5, f'{display_val:.2f}', ha='center', va='center', 
                 fontsize=fontsize, color=text_color, weight='bold')
     
     ax.set_xlim(0, len(features))
@@ -128,9 +156,9 @@ def create_feature_visualization(features: np.ndarray, title: str,
             step = max(1, len(features) // 8)
             tick_indices = range(0, len(features), step)
             ax.set_xticks([i + 0.5 for i in tick_indices])
-            ax.set_xticklabels([f'F{i}' for i in tick_indices], fontsize=6)
+            ax.set_xticklabels([f'{i}' for i in tick_indices], fontsize=6)
         else:
-            ax.set_xticklabels([f'F{i}' for i in range(len(features))], fontsize=7)
+            ax.set_xticklabels([f'{i}' for i in range(len(features))], fontsize=7)
     
     ax.set_yticks([])
     ax.set_aspect('equal')
@@ -141,7 +169,9 @@ def create_feature_visualization(features: np.ndarray, title: str,
 
 def create_combined_visualization(activation_data: Dict[str, List[np.ndarray]], 
                                 activation_titles: Dict[str, List[str]],
-                                grid_thumbnails: Optional[Dict[str, List[np.ndarray]]] = None) -> Dict[str, Figure]:
+                                grid_thumbnails: Optional[Dict[str, List[np.ndarray]]] = None,
+                                raw_activation_data: Optional[Dict[str, List[np.ndarray]]] = None,
+                                normalization_ranges: Optional[Dict[str, Dict[str, np.ndarray]]] = None) -> Dict[str, Figure]:
     """Create separate plots for each activation type with shape (n_observations, n_features)."""
     if not activation_data:
         return {}
@@ -160,6 +190,19 @@ def create_combined_visualization(activation_data: Dict[str, List[np.ndarray]],
         stacked_features = np.array(features_list)  # Shape: (n_observations, n_features)
         n_obs, n_features = stacked_features.shape
         
+        # Get raw features for display if available
+        if raw_activation_data and activation_type in raw_activation_data:
+            stacked_raw_features = np.array(raw_activation_data[activation_type])
+        else:
+            stacked_raw_features = stacked_features
+        
+        # Get normalization ranges for zero-range detection
+        min_vals = None
+        max_vals = None
+        if normalization_ranges and activation_type in normalization_ranges:
+            min_vals = normalization_ranges[activation_type]['min']
+            max_vals = normalization_ranges[activation_type]['max']
+        
         # Create figure with space for thumbnails on the left
         thumbnail_width = 0.8 if grid_thumbnails else 0
         fig_width = max(8, n_features * 0.3) + thumbnail_width
@@ -174,16 +217,33 @@ def create_combined_visualization(activation_data: Dict[str, List[np.ndarray]],
         
         for obs_idx in range(n_obs):
             for feat_idx in range(n_features):
-                val = stacked_features[obs_idx, feat_idx]
-                color = cmap(val)
+                norm_val = stacked_features[obs_idx, feat_idx]  # Normalized value for color
+                raw_val = stacked_raw_features[obs_idx, feat_idx]  # Raw value for display
+                
+                # Check if this feature has zero range (constant value)
+                has_zero_range = False
+                if min_vals is not None and max_vals is not None:
+                    has_zero_range = (min_vals[feat_idx] == max_vals[feat_idx])
+                
+                if has_zero_range:
+                    # Use yellow color for features with zero range
+                    color = 'yellow'
+                else:
+                    # Use normalized value for color mapping
+                    color = cmap(norm_val)
+                
                 rect = patches.Rectangle((feat_idx + x_offset, n_obs - obs_idx - 1), 1, 1, 
                                        facecolor=color, edgecolor='black', linewidth=0.3)
                 ax.add_patch(rect)
                 
-                # Add feature value text (smaller font for dense plots)
-                text_color = 'white' if val < 0.3 or val > 0.7 else 'black'
+                # Add feature value text (display raw value)
+                # Use black text for yellow background, otherwise use original logic
+                if has_zero_range:
+                    text_color = 'black'
+                else:
+                    text_color = 'white' if norm_val < 0.3 or norm_val > 0.7 else 'black'
                 fontsize = min(8, max(4, 60 / max(n_obs, n_features)))
-                ax.text(feat_idx + x_offset + 0.5, n_obs - obs_idx - 0.5, f'{val:.2f}', 
+                ax.text(feat_idx + x_offset + 0.5, n_obs - obs_idx - 0.5, f'{raw_val:.2f}', 
                        ha='center', va='center', fontsize=fontsize, 
                        color=text_color, weight='bold')
         
@@ -208,7 +268,7 @@ def create_combined_visualization(activation_data: Dict[str, List[np.ndarray]],
         
         ax.set_xlim(-0.2 - thumbnail_width if grid_thumbnails else 0, n_features + x_offset)
         ax.set_ylim(0, n_obs)
-        ax.set_title(f'{activation_type} - Combined View ({n_obs} observations)', fontsize=12, pad=10)
+        ax.set_title(f'{activation_type} - ({n_obs} observations)', fontsize=12, pad=10)
         
         # Set y-axis labels (observation names)
         ax.set_yticks(np.arange(n_obs) + 0.5)
@@ -234,32 +294,34 @@ def main():
     
     # Parse command line arguments
     if len(sys.argv) > 1:
-        filename = sys.argv[1]
+        results_dir = sys.argv[1]
     else:
-        st.error("Please provide a filename as argument: streamlit run script.py -- filename.pkl")
+        st.error("Please provide a results directory as argument: streamlit run script.py -- results_directory")
         st.stop()
     
-    st.title("🧠 Multi-Task Gridworld Neural Activation Visualizer")
+    st.title("Activation Heat Maps For Multi-Task DQN Architecture in Gridworld Maze")
     st.markdown("---")
     
     # Load data
-    activations, metadata = load_data(filename)
+    activations, metadata = load_data(results_dir)
     
     # Display metadata
-    with st.expander("📊 Dataset Information", expanded=False):
+    with st.expander("Dataset Information", expanded=False):
         col1, col2 = st.columns(2)
         
         with col1:
             st.subheader("Environment Metadata")
             st.write(f"**Grid Size:** {metadata['grid_size']}×{metadata['grid_size']}")
-            st.write(f"**Number of Tasks:** {metadata['num_hallways']}")
-            st.write(f"**Goal Location:** {metadata['goal_loc']}")
+            st.write(f"**Number of Tasks:** {metadata.get('num_hallways', metadata.get('num_goals', 'Unknown'))}")
+            st.write(f"**Goal Locations:** {metadata['goal_locs']}")
             st.write(f"**Start Location:** {metadata['start_loc']}")
             st.write(f"**Hallway Locations:** {metadata['hallway_locs']}")
         
         with col2:
             st.subheader("Model Configuration")
             config = metadata['config']
+            st.write(f"**Network Type:** {config.get('NETWORK_NAME', 'Unknown')}")
+            st.write(f"**Shared Expand:** {config.get('N_SHARED_EXPAND', 'N/A')}")
             st.write(f"**Shared Bottleneck:** {config.get('N_SHARED_BOTTLENECK', 'N/A')}")
             st.write(f"**Task Features:** {config.get('N_FEATURES_PER_TASK', 'N/A')}")
             st.write(f"**Conv1 Features:** {config.get('N_FEATURES_CONV1', 'N/A')}")
@@ -269,18 +331,23 @@ def main():
     
     # Initialize session state
     if 'grid_configs' not in st.session_state:
-        # Default: one grid per hallway
+        # Default: one grid for first goal-hallway combination
         st.session_state.grid_configs = []
-        for i in range(metadata['num_hallways']):
-            hallway_loc = tuple(metadata['hallway_locs'][i])
+        if metadata['num_goals'] > 0 and metadata['num_hallways'] > 0:
             start_loc = tuple(metadata['start_loc'])
             st.session_state.grid_configs.append({
-                'hallway_idx': i,
+                'goal_idx': 0,
+                'hallway_idx': 0,
                 'agent_loc': start_loc
             })
     
+    # Determine if network has task-specific representations
+    config = metadata['config']
+    network_name = config.get('NETWORK_NAME', '')
+    has_task_reps = network_name == 'MTQNetWithTaskReps'
+    
     # Control panel
-    st.subheader("🎛️ Control Panel")
+    st.subheader("Controls")
     
     col1, col2, col3 = st.columns([2, 2, 1])
     
@@ -288,16 +355,24 @@ def main():
         # Visualization options
         st.write("**Activation Displays:**")
         show_shared_rep = st.checkbox("Show Shared Representations", value=True)
-        show_task_rep = st.checkbox("Show Task Representations", value=True)
-        show_q_values = st.checkbox("Show Q-Values", value=False)
         
-        if show_task_rep:
-            selected_tasks = st.multiselect(
-                "Select Task Representations",
-                options=list(range(metadata['num_hallways'])),
-                default=[0] if metadata['num_hallways'] > 0 else []
-            )
+        if has_task_reps:
+            show_task_rep = st.checkbox("Show Task Representations", value=True)
+            if show_task_rep:
+                # Determine number of tasks based on environment type
+                config = metadata['config']
+                is_easy_env = "Easy" in config.get("ENV_NAME", "")
+                num_tasks = metadata['num_hallways'] if is_easy_env else metadata['num_goals']
+                
+                selected_tasks = st.multiselect(
+                    "Select Task Representations",
+                    options=list(range(num_tasks)),
+                    default=[0] if num_tasks > 0 else []
+                )
+            else:
+                selected_tasks = []
         else:
+            show_task_rep = False
             selected_tasks = []
     
     with col2:
@@ -312,6 +387,7 @@ def main():
         st.write("**Grid Management:**")
         if st.button("➕ Add Grid"):
             st.session_state.grid_configs.append({
+                'goal_idx': 0,
                 'hallway_idx': 0,
                 'agent_loc': tuple(metadata['start_loc'])
             })
@@ -324,54 +400,89 @@ def main():
     
     st.markdown("---")
     
-    # Compute normalization ranges
+    # Compute normalization ranges - per feature normalization
     all_shared_reps = []
-    all_task_reps = {task_idx: [] for task_idx in range(metadata['num_hallways'])}
+    all_task_reps = {}
     
-    for hallway_idx in range(metadata['num_hallways']):
-        for (row, col), shared_rep in activations[hallway_idx]['shared_rep'].items():
-            all_shared_reps.append(shared_rep)
-        
-        for (row, col), task_rep_array in activations[hallway_idx]['task_rep'].items():
-            for task_idx in range(metadata['num_hallways']):
-                all_task_reps[task_idx].append(task_rep_array[task_idx])
+    # Determine number of tasks based on environment type
+    config = metadata['config']
+    is_easy_env = "Easy" in config.get("ENV_NAME", "")
+    num_tasks = metadata['num_hallways'] if is_easy_env else metadata['num_goals']
     
-    # Compute normalization ranges
-    shared_rep_min = np.min([np.min(rep) for rep in all_shared_reps]) if all_shared_reps else 0
-    shared_rep_max = np.max([np.max(rep) for rep in all_shared_reps]) if all_shared_reps else 1
+    if has_task_reps:
+        all_task_reps = {task_idx: [] for task_idx in range(num_tasks)}
     
+    # Iterate through all goal-hallway combinations
+    for goal_idx in range(metadata['num_goals']):
+        for hallway_idx in range(metadata['num_hallways']):
+            combo_key = (goal_idx, hallway_idx)
+            if combo_key in activations:
+                combo_data = activations[combo_key]
+                
+                # Collect shared representations
+                for (row, col), shared_rep in combo_data['shared_rep'].items():
+                    all_shared_reps.append(shared_rep)
+                
+                # Collect task representations if available
+                if has_task_reps and 'task_rep' in combo_data:
+                    for (row, col), task_rep_array in combo_data['task_rep'].items():
+                        # Determine which task to use based on environment type
+                        if is_easy_env:
+                            task_idx = hallway_idx  # Task defined by hallway
+                        else:
+                            task_idx = goal_idx     # Task defined by goal
+                        
+                        if task_idx < len(task_rep_array):
+                            all_task_reps[task_idx].append(task_rep_array[task_idx])
+    
+    # Compute per-feature normalization ranges for shared representations
+    if all_shared_reps:
+        shared_reps_array = np.array(all_shared_reps)  # Shape: (n_observations, n_features)
+        shared_rep_min = np.min(shared_reps_array, axis=0)  # Per-feature min
+        shared_rep_max = np.max(shared_reps_array, axis=0)  # Per-feature max
+    else:
+        shared_rep_min = np.array([0])
+        shared_rep_max = np.array([1])
+    
+    # Compute per-feature normalization ranges for task representations
     task_rep_ranges = {}
-    for task_idx in range(metadata['num_hallways']):
-        if all_task_reps[task_idx]:
-            task_rep_ranges[task_idx] = {
-                'min': np.min([np.min(rep) for rep in all_task_reps[task_idx]]),
-                'max': np.max([np.max(rep) for rep in all_task_reps[task_idx]])
-            }
-        else:
-            task_rep_ranges[task_idx] = {'min': 0, 'max': 1}
+    if has_task_reps:
+        for task_idx in range(num_tasks):
+            if task_idx in all_task_reps and all_task_reps[task_idx]:
+                task_reps_array = np.array(all_task_reps[task_idx])  # Shape: (n_observations, n_features)
+                task_rep_ranges[task_idx] = {
+                    'min': np.min(task_reps_array, axis=0),  # Per-feature min
+                    'max': np.max(task_reps_array, axis=0)   # Per-feature max
+                }
+            else:
+                task_rep_ranges[task_idx] = {'min': np.array([0]), 'max': np.array([1])}
     
     # Main visualization
-    st.subheader("🔍 Grid Observations and Neural Activations")
+    st.subheader("Observations and Activations")
     
     # Collect data for combined view
     combined_activation_data = {
-        'Shared Representations': [],
-        'Q-Values': []
+        'Shared Representations': []
     }
     combined_activation_titles = {
-        'Shared Representations': [],
-        'Q-Values': []
+        'Shared Representations': []
     }
     combined_grid_thumbnails = {
-        'Shared Representations': [],
-        'Q-Values': []
+        'Shared Representations': []
     }
     
-    # Add task-specific data structures
-    for task_idx in range(metadata['num_hallways']):
-        combined_activation_data[f'Task {task_idx} Representations'] = []
-        combined_activation_titles[f'Task {task_idx} Representations'] = []
-        combined_grid_thumbnails[f'Task {task_idx} Representations'] = []
+    # Collect raw data for display
+    raw_activation_data = {
+        'Shared Representations': []
+    }
+    
+    # Add task-specific data structures if available
+    if has_task_reps:
+        for task_idx in range(num_tasks):
+            combined_activation_data[f'Task {task_idx} Representations'] = []
+            combined_activation_titles[f'Task {task_idx} Representations'] = []
+            combined_grid_thumbnails[f'Task {task_idx} Representations'] = []
+            raw_activation_data[f'Task {task_idx} Representations'] = []
     
     if display_mode == "Separate (next to each grid)":
         # Show each grid with its activations side-by-side
@@ -382,7 +493,15 @@ def main():
             grid_col, activation_col = st.columns([1, 2])
             
             with grid_col:
-                # Hallway selection (compact)
+                # Goal selection
+                new_goal_idx = st.selectbox(
+                    f"Goal",
+                    options=list(range(metadata['num_goals'])),
+                    index=grid_config['goal_idx'],
+                    key=f"goal_{grid_idx}"
+                )
+                
+                # Hallway selection
                 new_hallway_idx = st.selectbox(
                     f"Hallway",
                     options=list(range(metadata['num_hallways'])),
@@ -390,15 +509,17 @@ def main():
                     key=f"hallway_{grid_idx}"
                 )
                 
-                if new_hallway_idx != grid_config['hallway_idx']:
+                if new_goal_idx != grid_config['goal_idx'] or new_hallway_idx != grid_config['hallway_idx']:
+                    st.session_state.grid_configs[grid_idx]['goal_idx'] = new_goal_idx
                     st.session_state.grid_configs[grid_idx]['hallway_idx'] = new_hallway_idx
                     st.rerun()
                 
                 # Create and display observation grid (smaller size)
+                goal_idx = grid_config['goal_idx']
                 hallway_idx = grid_config['hallway_idx']
+                goal_loc = tuple(metadata['goal_locs'][goal_idx])
                 hallway_loc = tuple(metadata['hallway_locs'][hallway_idx])
                 agent_loc = grid_config['agent_loc']
-                goal_loc = tuple(metadata['goal_loc'])
                 
                 # Create observation visualization
                 grid_vis = create_observation_grid(
@@ -407,10 +528,8 @@ def main():
                 
                 fig, ax = plt.subplots(figsize=(2.5, 2.5))  # Even smaller grid size
                 ax.imshow(grid_vis)
-                ax.set_title(f'H{hallway_idx} at {hallway_loc}', fontsize=9)
                 ax.set_xticks(range(metadata['grid_size']))
                 ax.set_yticks(range(metadata['grid_size']))
-                ax.grid(True, alpha=0.3)
                 ax.tick_params(labelsize=7)
                 
                 st.pyplot(fig)
@@ -436,10 +555,10 @@ def main():
             
             with activation_col:
                 # Show activations for this specific grid
-                if agent_loc in activations[hallway_idx]['shared_rep']:
-                    shared_rep = activations[hallway_idx]['shared_rep'][agent_loc]
-                    task_rep_array = activations[hallway_idx]['task_rep'][agent_loc]
-                    q_values_array = activations[hallway_idx]['q_values'][agent_loc]
+                combo_key = (goal_idx, hallway_idx)
+                if combo_key in activations and agent_loc in activations[combo_key]['shared_rep']:
+                    combo_data = activations[combo_key]
+                    shared_rep = combo_data['shared_rep'][agent_loc]
                     
                     # Normalize features
                     normalized_shared = normalize_features(shared_rep, shared_rep_min, shared_rep_max)
@@ -448,49 +567,45 @@ def main():
                         fig = create_feature_visualization(
                             normalized_shared, 
                             f"Shared Rep",
-                            compact=True
+                            compact=True,
+                            raw_features=shared_rep,
+                            min_vals=shared_rep_min,
+                            max_vals=shared_rep_max
                         )
                         st.pyplot(fig)
                         plt.close(fig)
                     
-                    if show_task_rep:
+                    if show_task_rep and has_task_reps and 'task_rep' in combo_data:
+                        task_rep_array = combo_data['task_rep'][agent_loc]
                         for task_idx in selected_tasks:
-                            task_rep = task_rep_array[task_idx]
-                            task_range = task_rep_ranges[task_idx]
-                            normalized_task = normalize_features(task_rep, task_range['min'], task_range['max'])
-                            
-                            fig = create_feature_visualization(
-                                normalized_task,
-                                f"Task {task_idx} Rep",
-                                compact=True
-                            )
-                            st.pyplot(fig)
-                            plt.close(fig)
-                    
-                    if show_q_values:
-                        q_values = q_values_array[hallway_idx]
-                        normalized_q = normalize_features(q_values, np.min(q_values), np.max(q_values))
-                        
-                        fig = create_feature_visualization(
-                            normalized_q,
-                            f"Q-Values",
-                            ['Up', 'Right', 'Down', 'Left'],
-                            compact=True
-                        )
-                        st.pyplot(fig)
-                        plt.close(fig)
+                            if task_idx < len(task_rep_array):
+                                task_rep = task_rep_array[task_idx]
+                                task_range = task_rep_ranges[task_idx]
+                                normalized_task = normalize_features(task_rep, task_range['min'], task_range['max'])
+                                
+                                fig = create_feature_visualization(
+                                    normalized_task,
+                                    f"Task {task_idx} Rep",
+                                    compact=True,
+                                    raw_features=task_rep,
+                                    min_vals=task_range['min'],
+                                    max_vals=task_range['max']
+                                )
+                                st.pyplot(fig)
+                                plt.close(fig)
                 else:
-                    st.warning(f"No activation data available")
+                    st.warning(f"No activation data available for goal {goal_idx}, hallway {hallway_idx}, agent at {agent_loc}")
             
             st.markdown("---")
     
     else:  # Combined view - collect all data first, then show combined plots
         # First, collect all the activation data
         for grid_idx, grid_config in enumerate(st.session_state.grid_configs):
+            goal_idx = grid_config['goal_idx']
             hallway_idx = grid_config['hallway_idx']
+            goal_loc = tuple(metadata['goal_locs'][goal_idx])
             hallway_loc = tuple(metadata['hallway_locs'][hallway_idx])
             agent_loc = grid_config['agent_loc']
-            goal_loc = tuple(metadata['goal_loc'])
             
             # Create grid thumbnail for this configuration
             grid_thumbnail = create_observation_grid(
@@ -498,10 +613,10 @@ def main():
             )
             
             # Collect activation data for this grid
-            if agent_loc in activations[hallway_idx]['shared_rep']:
-                shared_rep = activations[hallway_idx]['shared_rep'][agent_loc]
-                task_rep_array = activations[hallway_idx]['task_rep'][agent_loc]
-                q_values_array = activations[hallway_idx]['q_values'][agent_loc]
+            combo_key = (goal_idx, hallway_idx)
+            if combo_key in activations and agent_loc in activations[combo_key]['shared_rep']:
+                combo_data = activations[combo_key]
+                shared_rep = combo_data['shared_rep'][agent_loc]
                 
                 # Normalize features
                 normalized_shared = normalize_features(shared_rep, shared_rep_min, shared_rep_max)
@@ -511,25 +626,22 @@ def main():
                     combined_activation_data['Shared Representations'].append(normalized_shared)
                     combined_activation_titles['Shared Representations'].append(f"Grid {grid_idx + 1}")
                     combined_grid_thumbnails['Shared Representations'].append(grid_thumbnail)
+                    raw_activation_data['Shared Representations'].append(shared_rep)
                 
-                if show_task_rep:
+                if show_task_rep and has_task_reps and 'task_rep' in combo_data:
+                    task_rep_array = combo_data['task_rep'][agent_loc]
                     for task_idx in selected_tasks:
-                        task_rep = task_rep_array[task_idx]
-                        task_range = task_rep_ranges[task_idx]
-                        normalized_task = normalize_features(task_rep, task_range['min'], task_range['max'])
-                        combined_activation_data[f'Task {task_idx} Representations'].append(normalized_task)
-                        combined_activation_titles[f'Task {task_idx} Representations'].append(f"Grid {grid_idx + 1}")
-                        combined_grid_thumbnails[f'Task {task_idx} Representations'].append(grid_thumbnail)
-                
-                if show_q_values:
-                    q_values = q_values_array[hallway_idx]
-                    normalized_q = normalize_features(q_values, np.min(q_values), np.max(q_values))
-                    combined_activation_data['Q-Values'].append(normalized_q)
-                    combined_activation_titles['Q-Values'].append(f"Grid {grid_idx + 1}")
-                    combined_grid_thumbnails['Q-Values'].append(grid_thumbnail)
+                        if task_idx < len(task_rep_array):
+                            task_rep = task_rep_array[task_idx]
+                            task_range = task_rep_ranges[task_idx]
+                            normalized_task = normalize_features(task_rep, task_range['min'], task_range['max'])
+                            combined_activation_data[f'Task {task_idx} Representations'].append(normalized_task)
+                            combined_activation_titles[f'Task {task_idx} Representations'].append(f"Grid {grid_idx + 1}")
+                            combined_grid_thumbnails[f'Task {task_idx} Representations'].append(grid_thumbnail)
+                            raw_activation_data[f'Task {task_idx} Representations'].append(task_rep)
         
         # Show all grids in a compact view first
-        st.write("**All Observation Grids**")
+        st.write("**All Observations**")
         
         # Create columns for grids (show multiple per row)
         grids_per_row = min(4, len(st.session_state.grid_configs))
@@ -539,23 +651,33 @@ def main():
             for grid_idx, grid_config in enumerate(st.session_state.grid_configs):
                 col_idx = grid_idx % grids_per_row
                 with grid_cols[col_idx]:
+                    # Goal selection (compact)
+                    new_goal_idx = st.selectbox(
+                        f"G{grid_idx + 1}",
+                        options=list(range(metadata['num_goals'])),
+                        index=grid_config['goal_idx'],
+                        key=f"comb_goal_{grid_idx}"
+                    )
+                    
                     # Hallway selection (compact)
                     new_hallway_idx = st.selectbox(
                         f"H{grid_idx + 1}",
                         options=list(range(metadata['num_hallways'])),
                         index=grid_config['hallway_idx'],
-                        key=f"hallway_{grid_idx}"
+                        key=f"comb_hallway_{grid_idx}"
                     )
                     
-                    if new_hallway_idx != grid_config['hallway_idx']:
+                    if new_goal_idx != grid_config['goal_idx'] or new_hallway_idx != grid_config['hallway_idx']:
+                        st.session_state.grid_configs[grid_idx]['goal_idx'] = new_goal_idx
                         st.session_state.grid_configs[grid_idx]['hallway_idx'] = new_hallway_idx
                         st.rerun()
                     
                     # Create and display observation grid (very small)
+                    goal_idx = grid_config['goal_idx']
                     hallway_idx = grid_config['hallway_idx']
+                    goal_loc = tuple(metadata['goal_locs'][goal_idx])
                     hallway_loc = tuple(metadata['hallway_locs'][hallway_idx])
                     agent_loc = grid_config['agent_loc']
-                    goal_loc = tuple(metadata['goal_loc'])
                     
                     # Create observation visualization
                     grid_vis = create_observation_grid(
@@ -564,10 +686,8 @@ def main():
                     
                     fig, ax = plt.subplots(figsize=(2, 2))  # Very small for combined view
                     ax.imshow(grid_vis)
-                    ax.set_title(f'G{grid_idx + 1}H{hallway_idx}', fontsize=8)
                     ax.set_xticks(range(metadata['grid_size']))
                     ax.set_yticks(range(metadata['grid_size']))
-                    ax.grid(True, alpha=0.3)
                     ax.tick_params(labelsize=6)
                     
                     st.pyplot(fig)
@@ -578,11 +698,11 @@ def main():
                     with r_col:
                         new_row = st.number_input(f"R", 
                                                 min_value=0, max_value=metadata['grid_size']-1, 
-                                                value=agent_loc[0], key=f"row_{grid_idx}")
+                                                value=agent_loc[0], key=f"comb_row_{grid_idx}")
                     with c_col:
                         new_col = st.number_input(f"C", 
                                                 min_value=0, max_value=metadata['grid_size']-1, 
-                                                value=agent_loc[1], key=f"col_{grid_idx}")
+                                                value=agent_loc[1], key=f"comb_col_{grid_idx}")
                     
                     if (new_row, new_col) != agent_loc:
                         if is_valid_location(new_row, new_col, metadata['grid_size'], goal_loc, hallway_loc):
@@ -594,11 +714,27 @@ def main():
         st.markdown("---")
         st.write("**Combined Activation View**")
         
+        # Prepare normalization ranges for combined visualization
+        normalization_ranges = {
+            'Shared Representations': {'min': shared_rep_min, 'max': shared_rep_max}
+        }
+        
+        # Add task-specific normalization ranges if available
+        if has_task_reps:
+            for task_idx in range(num_tasks):
+                if task_idx in task_rep_ranges:
+                    normalization_ranges[f'Task {task_idx} Representations'] = {
+                        'min': task_rep_ranges[task_idx]['min'],
+                        'max': task_rep_ranges[task_idx]['max']
+                    }
+        
         # Create combined visualizations
         combined_figures = create_combined_visualization(
             combined_activation_data, 
             combined_activation_titles, 
-            combined_grid_thumbnails
+            combined_grid_thumbnails,
+            raw_activation_data,
+            normalization_ranges
         )
         
         for activation_type, fig in combined_figures.items():
@@ -610,9 +746,6 @@ def main():
                 if task_idx in selected_tasks:
                     st.pyplot(fig)
                     plt.close(fig)
-            elif activation_type == 'Q-Values' and show_q_values:
-                st.pyplot(fig)
-                plt.close(fig)
 
 
 if __name__ == "__main__":

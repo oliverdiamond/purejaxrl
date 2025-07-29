@@ -70,7 +70,7 @@ class LogEnvState:
     timestep: int
 
 
-class LogWrapper(GymnaxWrapper):
+class LogWrapper(GymnaxWrapper): # TODO Add discounted returns
     """Log the episode returns and lengths."""
 
     def __init__(self, env: environment.Environment):
@@ -88,16 +88,16 @@ class LogWrapper(GymnaxWrapper):
     def step(
         self,
         key: chex.PRNGKey,
-        state: environment.EnvState,
+        state: LogEnvState,
         action: Union[int, float],
         params: Optional[environment.EnvParams] = None,
-    ) -> Tuple[chex.Array, environment.EnvState, float, bool, dict]:
+    ) -> Tuple[chex.Array, LogEnvState, float, bool, dict]:
         obs, env_state, reward, done, info = self._env.step(
             key, state.env_state, action, params
         )
         new_episode_return = state.episode_returns + reward
         new_episode_length = state.episode_lengths + 1
-        state = LogEnvState(
+        state = LogEnvState( #TODO Fix this type error
             env_state=env_state,
             episode_returns=new_episode_return * (1 - done),
             episode_lengths=new_episode_length * (1 - done),
@@ -117,9 +117,11 @@ class LogWrapper(GymnaxWrapper):
 @struct.dataclass
 class MultiTaskLogEnvState:
     env_state: environment.EnvState
-    episode_returns: float
+    episode_returns: float  
+    discounted_episode_returns: float
     episode_lengths: int
     returned_episode_returns: float
+    returned_episode_discounted_returns: float
     returned_episode_lengths: int
     returned_episode_tasks: int
     timestep: int
@@ -134,30 +136,35 @@ class MultiTaskLogWrapper(GymnaxWrapper):
     @partial(jax.jit, static_argnums=(0,))
     def reset(
         self, key: chex.PRNGKey, params: Optional[environment.EnvParams] = None
-    ) -> Tuple[chex.Array, environment.EnvState]:
+    ) -> Tuple[chex.Array, MultiTaskLogEnvState]:
         obs, env_state = self._env.reset(key, params)
-        state = MultiTaskLogEnvState(env_state, 0, 0, 0, 0, env_state.task, 0)
+        state = MultiTaskLogEnvState(env_state, 0, 0, 0, 0, 0, 0, env_state.task, 0)
         return obs, state
 
     @partial(jax.jit, static_argnums=(0,))
     def step(
         self,
         key: chex.PRNGKey,
-        state: environment.EnvState,
+        state: MultiTaskLogEnvState,
         action: Union[int, float],
+        gamma: Union[int, float],
         params: Optional[environment.EnvParams] = None,
-    ) -> Tuple[chex.Array, environment.EnvState, float, bool, dict]:
+    ) -> Tuple[chex.Array, MultiTaskLogEnvState, float, bool, dict]:
         obs, env_state, reward, done, info = self._env.step(
             key, state.env_state, action, params
         )
         new_episode_return = state.episode_returns + reward
+        new_episode_discounted_return = state.discounted_episode_returns + (reward * (gamma ** state.episode_lengths))
         new_episode_length = state.episode_lengths + 1
         state = MultiTaskLogEnvState(
             env_state=env_state,
             episode_returns=new_episode_return * (1 - done),
+            discounted_episode_returns=new_episode_discounted_return * (1 - done),
             episode_lengths=new_episode_length * (1 - done),
             returned_episode_returns=state.returned_episode_returns * (1 - done)
             + new_episode_return * done,
+            returned_episode_discounted_returns=state.returned_episode_discounted_returns * (1 - done)
+            + new_episode_discounted_return * done,
             returned_episode_lengths=state.returned_episode_lengths * (1 - done)
             + new_episode_length * done,
             returned_episode_tasks=state.returned_episode_tasks * (1 - done)
@@ -165,6 +172,7 @@ class MultiTaskLogWrapper(GymnaxWrapper):
             timestep=state.timestep + 1,
         )
         info["returned_episode_returns"] = state.returned_episode_returns
+        info["returned_episode_discounted_returns"] = state.returned_episode_discounted_returns
         info["returned_episode_lengths"] = state.returned_episode_lengths
         info["timestep"] = state.timestep
         info["returned_episode"] = done

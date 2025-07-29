@@ -17,8 +17,8 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 
 from wrappers import MultiTaskLogWrapper
-from environments.rooms_multitask import TwoRoomsMultiTask5 as TwoRoomsMultiTask
-from environments.rooms_multitask import EnvState as TwoRoomsEnvStateMultiTask #TODO Make function to select based on conifg, will have easy and hard varaints and varaints with smaller/larger N
+from environments import make_multitask
+from environments.rooms_multitask import EnvState as TwoRoomsEnvStateMultiTask
 
 
 class TaskNet(nn.Module):
@@ -55,7 +55,7 @@ class TaskNet(nn.Module):
             "q_values": q_values
         }
 
-class MultiTaskMazeQNetwork(nn.Module):
+class MTQNetWithTaskReps(nn.Module):
     action_dim: int
     n_tasks: int
     n_features_per_task: int
@@ -135,6 +135,185 @@ class MultiTaskMazeQNetwork(nn.Module):
             "q_values": q_vals
         }
 
+class MTQNet(nn.Module):
+    action_dim: int
+    n_tasks: int
+    n_shared_expand: int
+    n_features_conv1: int
+    n_features_conv2: int
+
+    def setup(self):
+        w_conv_init = variance_scaling(scale=math.sqrt(5), mode='fan_avg', distribution='uniform')
+        w_init = variance_scaling(scale=1.0, mode='fan_avg', distribution='uniform')
+
+        # Conv Backbone
+        self.conv1 = nn.Conv(
+            features=self.n_features_conv1, kernel_size=(4, 4), strides=(1, 1), padding=[(1, 1), (1, 1)],
+            kernel_init=w_conv_init, name="conv1"
+        )
+        self.conv2 = nn.Conv(
+            features=self.n_features_conv2, kernel_size=(4, 4), strides=(2, 2), padding=[(2, 2), (2, 2)],
+            kernel_init=w_conv_init, name="conv2"
+        )
+        self.conv_backbone = nn.Sequential([
+            self.conv1,
+            nn.relu,
+            self.conv2,
+            nn.relu
+        ], name="conv_backbone")
+
+        self.shared_rep = nn.Sequential([
+            nn.Dense(self.n_shared_expand, kernel_init=w_init, name="shared_rep_expand"),
+            nn.relu
+        ], name="shared_rep")
+
+        # Task-specific networks
+        self.TaskHeads = nn.vmap(
+            nn.Dense,
+            variable_axes={'params': 0},
+            split_rngs={'params': True},
+            in_axes=None,
+            out_axes=0,
+            axis_size=self.n_tasks,
+        )(self.action_dim, name="TaskHeads")
+
+    def __call__(self, x: jnp.ndarray, task: jnp.ndarray):
+        # Apply the convolutional backbone
+        x = self.conv_backbone(x)
+        x = x.reshape((x.shape[0], -1))  # Flatten the output
+
+        # Shared representation layer
+        shared_rep = self.shared_rep(x)
+
+        # Task-specific outputs
+        q_vals = self.TaskHeads(shared_rep)
+        batch_indices = jnp.arange(x.shape[0])
+        selected_outputs = q_vals[task, batch_indices]
+
+        return selected_outputs
+
+    def get_activations(self, x: jnp.ndarray) -> dict[str, jnp.ndarray]:
+        """Returns intermediate activations."""
+        # Conv Backbone
+        x = self.conv_backbone(x)
+        x = x.reshape((x.shape[0], -1))  # Flatten the output
+        # Shared representation layer
+        shared_rep = self.shared_rep(x)
+        # Task-specific representations and heads
+        q_vals = self.TaskHeads(shared_rep)
+        
+        return {
+            "shared_rep": shared_rep,
+            "q_values": q_vals
+        }
+        
+
+class MTQNetWithBottleneck(nn.Module):
+    action_dim: int
+    n_tasks: int
+    n_shared_expand: int
+    n_shared_bottleneck: int
+    n_features_conv1: int
+    n_features_conv2: int
+
+    def setup(self):
+        w_conv_init = variance_scaling(scale=math.sqrt(5), mode='fan_avg', distribution='uniform')
+        w_init = variance_scaling(scale=1.0, mode='fan_avg', distribution='uniform')
+
+        # Conv Backbone
+        self.conv1 = nn.Conv(
+            features=self.n_features_conv1, kernel_size=(4, 4), strides=(1, 1), padding=[(1, 1), (1, 1)],
+            kernel_init=w_conv_init, name="conv1"
+        )
+        self.conv2 = nn.Conv(
+            features=self.n_features_conv2, kernel_size=(4, 4), strides=(2, 2), padding=[(2, 2), (2, 2)],
+            kernel_init=w_conv_init, name="conv2"
+        )
+        self.conv_backbone = nn.Sequential([
+            self.conv1,
+            nn.relu,
+            self.conv2,
+            nn.relu
+        ], name="conv_backbone")
+
+        self.shared_rep = nn.Sequential([
+            nn.Dense(self.n_shared_expand, kernel_init=w_init, name="shared_rep_expand"),
+            nn.Dense(self.n_shared_bottleneck, kernel_init=w_init, name="shared_rep_bottleneck"),
+            nn.relu
+        ], name="shared_rep")
+
+        # Task-specific networks
+        self.TaskHeads = nn.vmap(
+            nn.Dense,
+            variable_axes={'params': 0},
+            split_rngs={'params': True},
+            in_axes=None,
+            out_axes=0,
+            axis_size=self.n_tasks,
+        )(self.action_dim, name="TaskHeads")
+
+    def __call__(self, x: jnp.ndarray, task: jnp.ndarray):
+        # Apply the convolutional backbone
+        x = self.conv_backbone(x)
+        x = x.reshape((x.shape[0], -1))  # Flatten the output
+
+        # Shared representation layer
+        shared_rep = self.shared_rep(x)
+
+        # Task-specific outputs
+        q_vals = self.TaskHeads(shared_rep)
+        batch_indices = jnp.arange(x.shape[0])
+        selected_outputs = q_vals[task, batch_indices]
+
+        return selected_outputs
+
+    def get_activations(self, x: jnp.ndarray) -> dict[str, jnp.ndarray]:
+        """Returns intermediate activations."""
+        # Conv Backbone
+        x = self.conv_backbone(x)
+        x = x.reshape((x.shape[0], -1))  # Flatten the output
+        # Shared representation layer
+        shared_rep = self.shared_rep(x)
+        # Task-specific representations and heads
+        q_vals = self.TaskHeads(shared_rep)
+        
+        return {
+            "shared_rep": shared_rep,
+            "q_values": q_vals
+        }
+        
+        
+def make_network(config, action_dim, n_tasks):
+    """Returns the appropriate network based on the configuration."""
+    if config["NETWORK_NAME"] == "MTQNet":
+        return MTQNet(
+            action_dim=action_dim,
+            n_tasks=n_tasks,
+            n_shared_expand=config["N_SHARED_EXPAND"],
+            n_features_conv1=config["N_FEATURES_CONV1"],
+            n_features_conv2=config["N_FEATURES_CONV2"]
+        )
+    elif config["NETWORK_NAME"] == "MTQNetWithBottleneck":
+        return MTQNetWithBottleneck(
+            action_dim=action_dim,
+            n_tasks=n_tasks,
+            n_shared_expand=config["N_SHARED_EXPAND"],
+            n_shared_bottleneck=config["N_SHARED_BOTTLENECK"],
+            n_features_conv1=config["N_FEATURES_CONV1"],
+            n_features_conv2=config["N_FEATURES_CONV2"]
+        )
+    elif config["NETWORK_NAME"] == "MTQNetWithTaskReps":
+        return MTQNetWithTaskReps(
+            action_dim=action_dim,
+            n_tasks=n_tasks,
+            n_features_per_task=config["N_FEATURES_PER_TASK"],
+            n_shared_expand=config["N_SHARED_EXPAND"],
+            n_shared_bottleneck=config["N_SHARED_BOTTLENECK"],
+            n_features_conv1=config["N_FEATURES_CONV1"],
+            n_features_conv2=config["N_FEATURES_CONV2"]
+        )
+    else:
+        raise ValueError(f"Unknown network name: {config['NETWORK_NAME']}")
 
 @chex.dataclass(frozen=True)
 class MultiTaskTimeStep:
@@ -156,16 +335,15 @@ def make_train(config):
 
     config["NUM_UPDATES"] = config["TOTAL_TIMESTEPS"] // config["NUM_ENVS"]
 
-    basic_env = TwoRoomsMultiTask()
-    env_params = basic_env.default_params
+    basic_env, env_params = make_multitask(config["ENV_NAME"])
     env = MultiTaskLogWrapper(basic_env) # type: ignore
 
     vmap_reset = lambda n_envs: lambda rng: jax.vmap(env.reset, in_axes=(0, None))(
         jax.random.split(rng, n_envs), env_params
     )
     vmap_step = lambda n_envs: lambda rng, env_state, action: jax.vmap(
-        env.step, in_axes=(0, 0, 0, None)
-    )(jax.random.split(rng, n_envs), env_state, action, env_params)
+        env.step, in_axes=(0, 0, 0, None, None)
+    )(jax.random.split(rng, n_envs), env_state, action, config["GAMMA"], env_params)
 
     def train(rng):
 
@@ -190,20 +368,11 @@ def make_train(config):
         rng = jax.random.PRNGKey(0)  # use a dummy rng here
         _action = basic_env.action_space().sample(rng)
         _last_obs, _last_env_state = env.reset(rng, env_params)
-        _obs, _env_state, _reward, _done, _ = env.step(rng, _last_env_state, _action, env_params)
+        _obs, _env_state, _reward, _done, _ = env.step(rng, _last_env_state, _action, config["GAMMA"], env_params)
         _timestep = MultiTaskTimeStep(obs=_last_obs, next_obs=_obs, task=_last_env_state.env_state.task, action=_action, reward=_reward, done=_done) # type: ignore
         buffer_state = buffer.init(_timestep)
 
-        # INIT NETWORK AND OPTIMIZER
-        network = MultiTaskMazeQNetwork(
-            action_dim=env.action_space(env_params).n, 
-            n_tasks=env_params.n_tasks, # type: ignore
-            n_features_per_task=config["N_FEATURES_PER_TASK"],
-            n_shared_expand=config["N_SHARED_EXPAND"],
-            n_shared_bottleneck=config["N_SHARED_BOTTLENECK"],
-            n_features_conv1=config["N_FEATURES_CONV1"],
-            n_features_conv2=config["N_FEATURES_CONV2"],
-            )
+        network = make_network(config, action_dim=env.action_space(env_params).n, n_tasks=env_params.n_tasks)
         rng, _rng = jax.random.split(rng)
         init_x = jnp.zeros((1,) + env.observation_space(env_params).shape) # Conv layers need extra dimension for batch size
         init_task = jnp.zeros((1,), dtype=jnp.int32)
@@ -346,6 +515,7 @@ def make_train(config):
                 "updates": train_state.n_updates,
                 "loss": loss.mean(),
                 "undiscounted_returns": info["returned_episode_returns"].mean(),
+                "discounted_returns": info["returned_episode_discounted_returns"].mean(),
                 "task": info["returned_episode_tasks"][0] # only works for single env (no parallelization)
             }
             # report on wandb if required
@@ -361,11 +531,12 @@ def make_train(config):
                 def print_callback(metrics):
                     if metrics["timesteps"] % 500 == 0:
                         jax.debug.print(
-                            "timesteps: {timesteps}, updates: {updates}, loss: {loss:.4f}, undiscounted_returns: {undiscounted_returns:.4f}, task: {task}",
+                            "timesteps: {timesteps}, updates: {updates}, loss: {loss:.4f}, undiscounted_returns: {undiscounted_returns:.4f}, discounted_returns: {discounted_returns:.4f} task: {task}",
                             timesteps=metrics["timesteps"],
                             updates=metrics["updates"],
                             loss=metrics["loss"],
                             undiscounted_returns=metrics["undiscounted_returns"],
+                            discounted_returns=metrics["discounted_returns"],
                             task=metrics["task"]
                         )
                 jax.debug.callback(print_callback, metrics)
@@ -388,67 +559,91 @@ def make_train(config):
     return train
 
 
-def plot_qvals(network_params, rng, config):
-    """Performs a forward pass with final params and visualizes Q-values for all hallway locations."""
-    #TODO Add logic to select between easy and hard env here and in train with jax.lax.cond
-    basic_env = TwoRoomsMultiTask()
-    env_params = basic_env.default_params
-    network = MultiTaskMazeQNetwork(
-        action_dim=basic_env.action_space(env_params).n, 
-        n_tasks=env_params.n_tasks, # type: ignore
-        n_features_per_task=config["N_FEATURES_PER_TASK"],
-        n_shared_expand=config["N_SHARED_EXPAND"],
-        n_shared_bottleneck=config["N_SHARED_BOTTLENECK"],
-        n_features_conv1=config["N_FEATURES_CONV1"],
-        n_features_conv2=config["N_FEATURES_CONV2"],
-        )
+def plot_and_store_data(network_params, rng, config):
+    """Performs a forward pass with final params and visualizes Q-values for all (goal, hallway) combinations."""
+    basic_env, env_params = make_multitask(config["ENV_NAME"])
+    
+    # Initialize the appropriate network based on config
+    network = make_network(config, action_dim=basic_env.action_space(env_params).n, n_tasks=env_params.n_tasks)
+    
     rng, _rng = jax.random.split(rng)
-    init_x = jnp.zeros((1,) + basic_env.observation_space(env_params).shape) # Conv layers need extra dimension for batch size
+    init_x = jnp.zeros((1,) + basic_env.observation_space(env_params).shape) # Conv layers need extra dimension for batch size # type: ignore
     init_task = jnp.zeros((1,), dtype=jnp.int32)
     _ = network.init(_rng, init_x, init_task)
+    
     # Get grid dimensions
     N = basic_env.N
     num_hallways = env_params.hallway_locs.shape[0]
+    num_goals = env_params.goal_locs.shape[0]
     
-    
-    # Store Q-values for all (hallway, agent_location) pairs
+    # Store Q-values and activations for all (goal, hallway, agent_location) combinations
     all_q_values = {}
+    all_activations = {}
     
-    # Outer loop: iterate over all hallway locations
-    for hallway_idx in range(num_hallways):
-        task = jnp.array([hallway_idx]) # TODO Check to make sure this is correct (might need to make shape different)
-        hallway_loc = env_params.hallway_locs[hallway_idx]
-        q_values_grid = jnp.zeros((N, N, 4))  # 4 actions: up, right, down, left
-        
-        # Inner loop: iterate over each location in the grid
-        for row in range(N):
-            for col in range(N):
-                agent_loc = jnp.array([row, col])
-                
-                # Check if this is a valid location for the agent
-                # 1. Not a wall location
-                # 2. Not the goal location
-                is_wall = (col == hallway_loc[1] and row != hallway_loc[0])
-                is_goal = jnp.array_equal(agent_loc, env_params.goal_loc)
-                
-                if not is_wall and not is_goal:
-                    # Create new state with current agent location
-                    current_state = TwoRoomsEnvStateMultiTask(
-                        time=0,
-                        task=task,
-                        hallway_loc=hallway_loc,
-                        agent_loc=agent_loc
-                    )
+    # Determine if this is an "Easy" environment (task defined by hallway) or regular (task defined by goal)
+    is_easy_env = "Easy" in config["ENV_NAME"]
+    
+    # Unified loop: iterate over all (goal, hallway) combinations
+    for goal_idx in range(num_goals):
+        for hallway_idx in range(num_hallways):
+            # Determine task based on environment type
+            if is_easy_env:
+                task = jnp.array([hallway_idx])  # Task defined by hallway
+            else:
+                task = jnp.array([goal_idx])  # Task defined by goal
+            
+            goal_loc = env_params.goal_locs[goal_idx]
+            hallway_loc = env_params.hallway_locs[hallway_idx]
+            combo_key = (goal_idx, hallway_idx)
+            q_values_grid = jnp.zeros((N, N, 4))  # 4 actions: up, right, down, left
+            
+            # Store activations for this combination
+            activations_data = {
+                'shared_rep': {},
+                'q_values': {}
+            }
+            if config["NETWORK_NAME"] == "MTQNetWithTaskReps":
+                activations_data['task_rep'] = {}
+            
+            # Inner loop: iterate over each location in the grid
+            for row in range(N):
+                for col in range(N):
+                    agent_loc = jnp.array([row, col])
                     
-                    # Generate observation for this state
-                    obs = basic_env.get_obs(current_state, params=env_params)
-                    obs_batch = jnp.expand_dims(obs, 0) # Add batch dimension
+                    # Check if this is a valid location for the agent
+                    is_wall = (col == hallway_loc[1] and row != hallway_loc[0])
+                    is_goal_loc = jnp.array_equal(agent_loc, goal_loc)
                     
-                    # Forward pass through network
-                    q_vals = network.apply(network_params, obs_batch, task)
-                    q_values_grid = q_values_grid.at[row, col].set(q_vals[0])
-        
-        all_q_values[hallway_idx] = q_values_grid
+                    if not is_wall and not is_goal_loc:
+                        # Create new state with current agent location                    
+                        current_state = TwoRoomsEnvStateMultiTask(
+                            time=0,
+                            task=task,
+                            start_loc=env_params.start_locs[0],
+                            hallway_loc=hallway_loc,
+                            agent_loc=agent_loc,
+                            goal_loc=goal_loc,
+                        )
+                        
+                        # Generate observation for this state
+                        obs = basic_env.get_obs(current_state, params=env_params)
+                        obs_batch = jnp.expand_dims(obs, 0) # Add batch dimension
+                        
+                        # Forward pass through network
+                        q_vals = network.apply(network_params, obs_batch, task)
+                        q_values_grid = q_values_grid.at[row, col].set(q_vals[0])
+                        
+                        # Get activations
+                        activations = network.apply(network_params, obs_batch, method=network.get_activations)
+                        
+                        # Store activations for this location (squeeze out dimensions of size 1)
+                        if config["NETWORK_NAME"] == "MTQNetWithTaskReps":
+                            activations_data['task_rep'][(row, col)] = jnp.squeeze(activations["task_rep"], axis=1)  # shape: (n_tasks, N_FEATURES_PER_TASK) # type: ignore
+                        activations_data['shared_rep'][(row, col)] = jnp.squeeze(activations["shared_rep"], axis=0)  # shape: (N_SHARED_BOTTLENECK,) or (N_SHARED_EXPAND,) # type: ignore
+                        activations_data['q_values'][(row, col)] = jnp.squeeze(activations["q_values"], axis=1)  # shape: (n_tasks, n_actions) # type: ignore
+            
+            all_q_values[combo_key] = q_values_grid
+            all_activations[combo_key] = activations_data
     
     # Create visualization with dynamic sizing
     # Scale figure size and font sizes based on grid size
@@ -460,14 +655,27 @@ def plot_qvals(network_params, rng, config):
     label_fontsize = max(8, min(24, 120 / N))   # For S and G labels
     edge_linewidth = max(0.3, min(1.0, 8 / N)) # Thinner lines for larger grids
     
-    fig, axes = plt.subplots(1, num_hallways, figsize=(fig_size * num_hallways, fig_size))
-    if num_hallways == 1:
-        axes = [axes]
+    # Calculate subplot arrangement - use a simple grid layout for all cases
+    num_combinations = len(all_q_values)
+    n_cols = min(num_combinations, 3)  # Max 3 columns
+    n_rows = (num_combinations + n_cols - 1) // n_cols  # Ceiling division
     
-    for hallway_idx in range(num_hallways):
-        ax = axes[hallway_idx]
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(fig_size * n_cols, fig_size * n_rows))
+    
+    # Always flatten axes to handle consistently
+    if num_combinations == 1:
+        axes = [axes]
+    elif n_rows > 1 or n_cols > 1:
+        axes = axes.flatten()
+    
+    # Simple iteration through combinations
+    for plot_idx, combo_key in enumerate(all_q_values.keys()):
+        goal_idx, hallway_idx = combo_key
+        ax = axes[plot_idx]
+        
         hallway_loc = env_params.hallway_locs[hallway_idx]
-        q_values_grid = all_q_values[hallway_idx]
+        goal_loc = env_params.goal_locs[goal_idx]
+        q_values_grid = all_q_values[combo_key]
         
         # Normalize Q-values for color mapping
         valid_q_values = []
@@ -475,7 +683,7 @@ def plot_qvals(network_params, rng, config):
             for col in range(N):
                 agent_loc = jnp.array([row, col])
                 is_wall = (col == hallway_loc[1] and row != hallway_loc[0])
-                is_goal = jnp.array_equal(agent_loc, env_params.goal_loc)
+                is_goal = jnp.array_equal(agent_loc, goal_loc)
                 if not is_wall and not is_goal:
                     valid_q_values.extend(q_values_grid[row, col])
         
@@ -490,7 +698,7 @@ def plot_qvals(network_params, rng, config):
             for col in range(N):
                 agent_loc = jnp.array([row, col])
                 is_wall = (col == hallway_loc[1] and row != hallway_loc[0])
-                is_goal = jnp.array_equal(agent_loc, env_params.goal_loc)
+                is_goal = jnp.array_equal(agent_loc, goal_loc)
                 
                 # Flip row for plotting (matplotlib uses bottom-left origin)
                 plot_row = N - 1 - row
@@ -531,9 +739,16 @@ def plot_qvals(network_params, rng, config):
                                                     edgecolor='black', linewidth=edge_linewidth * 0.5)
                         ax.add_patch(triangle)
                         
-                        # Add Q-value text in triangle center
-                        center_x = sum(v[0] for v in triangle_verts) / 3
-                        center_y = sum(v[1] for v in triangle_verts) / 3
+                        # Add Q-value text in triangle center, but shift slightly towards square center
+                        triangle_center_x = sum(v[0] for v in triangle_verts) / 3
+                        triangle_center_y = sum(v[1] for v in triangle_verts) / 3
+                        square_center_x = col + 0.5
+                        square_center_y = plot_row + 0.5
+                        
+                        # Move the text 30% of the way from triangle center to square center
+                        shift_factor = 0.15
+                        center_x = triangle_center_x + shift_factor * (square_center_x - triangle_center_x)
+                        center_y = triangle_center_y + shift_factor * (square_center_y - triangle_center_y)
                         
                         # Format Q-value text based on magnitude for better readability
                         if abs(q_val) >= 100:
@@ -547,7 +762,7 @@ def plot_qvals(network_params, rng, config):
                                 ha='center', va='center', fontsize=q_value_fontsize, 
                                 color='white', weight='bold')
                 
-                if jnp.array_equal(agent_loc, env_params.start_loc):
+                if jnp.array_equal(agent_loc, env_params.start_locs[0]):
                     # Draw S at start location
                     ax.text(col + 0.5, plot_row + 0.5, 'S', 
                             ha='center', va='center', fontsize=label_fontsize, 
@@ -565,20 +780,92 @@ def plot_qvals(network_params, rng, config):
         ax.set_xticklabels([])
         ax.set_yticklabels([])
         title_fontsize = max(10, min(16, 100 / N))  # Dynamic title font size
-        ax.set_title(f'Action Values For Task Head {hallway_idx} with Hallway at ({hallway_loc[0]}, {hallway_loc[1]})', 
-                     fontsize=title_fontsize)
         
-        # # Adjust tick spacing for larger grids to avoid clutter
-        # tick_spacing = max(1, N // 10)  # Show fewer ticks for large grids
-        # ax.set_xticks(range(0, N + 1, tick_spacing))
-        # ax.set_yticks(range(0, N + 1, tick_spacing))
+        if is_easy_env:
+            ax.set_title(f'Task {hallway_idx}: Hallway at ({hallway_loc[0]}, {hallway_loc[1]})', 
+                         fontsize=title_fontsize)
+        else:
+            ax.set_title(f'Task {goal_idx}: Goal at ({goal_loc[0]}, {goal_loc[1]}), Hallway at ({hallway_loc[0]}, {hallway_loc[1]})', 
+                         fontsize=title_fontsize)
+        
         ax.grid(True, alpha=0.3, linewidth=edge_linewidth * 0.5)
     
     plt.tight_layout()
-    plt.savefig(f'purejaxrl/plots/q_values_N={N}.png', dpi=300, bbox_inches='tight')
     
-    print(f"Q-values visualization saved as 'q_values_N={N}.png'")
-    print(f"Analyzed {num_hallways} hallway configuration(s) for {N}x{N} grid")
+    # Add extra padding around the figure borders
+    plt.subplots_adjust(left=0.05, right=0.95, top=0.9, bottom=0.1)
+    
+
+    file_prefix = f'purejaxrl/results/dqn_multitask/{config["ENV_NAME"]}/{config["NETWORK_NAME"]}/{config["CURRENT_TIME"]}'
+    # Save figure locally
+    fig_path = f'{file_prefix}/qvals.png'
+    os.makedirs(os.path.dirname(fig_path), exist_ok=True)
+    plt.savefig(fig_path, dpi=300, bbox_inches='tight')
+
+    # Log figure to wandb if enabled
+    if wandb.run is not None:
+        wandb.log({"q_values": wandb.Image(fig)})
+    
+    plt.close(fig)  # Close the figure to free memory
+    
+    # Save activations data to file
+    import pickle
+    import numpy as np
+    import json
+
+    data_path = f"{file_prefix}/activations.pkl"
+    os.makedirs(os.path.dirname(data_path), exist_ok=True)
+    
+    # Convert JAX arrays to numpy for saving using tree_map
+    activations_to_save = jax.tree_util.tree_map(np.asarray, all_activations)
+    
+    # Also save metadata
+    metadata = {
+        'config': config,
+        'grid_size': N,
+        'num_hallways': num_hallways,
+        'num_goals': num_goals,
+        'hallway_locs': np.array(env_params.hallway_locs).tolist(),
+        'goal_locs': np.array(env_params.goal_locs).tolist(),
+        'start_loc': np.array(env_params.start_locs[0]).tolist()
+    }
+    
+    save_data = {
+        'activations': activations_to_save,
+        'metadata': metadata
+    }
+    
+    with open(data_path, 'wb') as f:
+        pickle.dump(save_data, f)
+    
+    # Save metadata as JSON in both directories
+    metadata_json_data = f"{file_prefix}/metadata.json"
+
+    with open(metadata_json_data, 'w') as f:
+        json.dump(metadata, f, indent=2)
+    
+    # Log activations data to wandb if enabled
+    if wandb.run is not None:
+        # Create a wandb artifact for the activations data
+        artifact = wandb.Artifact(
+            name=f"activations_data_{wandb.run.name}",
+            type="activations",
+            )
+        artifact.add_file(data_path)
+        artifact.add_file(metadata_json_data)
+        wandb.log_artifact(artifact)
+        
+        # Also log some summary statistics
+        wandb.log({
+            "activations_file": data_path,
+        })
+
+    print(f"Q-values visualization saved as '{fig_path}'")
+    print(f"Activations data saved as '{data_path}'")
+    print(f"Metadata saved as JSON:")
+    print(f"  - {metadata_json_data}")
+
+    print(f"Analyzed {num_goals} goal(s) x {num_hallways} hallway(s) = {len(all_q_values)} combinations for {N}x{N} grid")
 
 
 def main():
@@ -587,26 +874,27 @@ def main():
         "NUM_ENVS": 1, # Must be set to 1, handling of truncation fails otherwise (entire batch is currently ignored if any transitions result in truncation)
         "BUFFER_SIZE": 10000,
         "BUFFER_BATCH_SIZE": 32,
-        "TOTAL_TIMESTEPS": 10000, # 15e4, #5e5,
-        "EPSILON_START": 0.1, # EPSILON_START==EPSILON_FINISH -> no annealing
-        "EPSILON_FINISH": 0.1,
-        "EPSILON_ANNEAL_TIME": 1e4,
+        "TOTAL_TIMESTEPS": 150000, # 15e4, #5e5,
+        "EPSILON_START": 1, # EPSILON_START==EPSILON_FINISH -> no annealing
+        "EPSILON_FINISH": 0.05,
+        "EPSILON_ANNEAL_TIME": 75000,
         "TARGET_UPDATE_INTERVAL": 64,
         "LR": 2.5e-4,
         "LEARNING_STARTS": 1000,
         "TRAINING_INTERVAL": 1,
-        "N_FEATURES_PER_TASK": 32,
-        "N_SHARED_EXPAND": 128,
+        "N_FEATURES_PER_TASK": 2,
+        "N_SHARED_EXPAND": 64,
         "N_SHARED_BOTTLENECK": 8,
         "N_FEATURES_CONV1": 32,
         "N_FEATURES_CONV2": 16,
         "LR_LINEAR_DECAY": False,
-        "GAMMA": 0.99,
+        "GAMMA": 0.8,
         "TAU": 1.0,
-        "ENV_NAME": "TwoRoomsMultiTask",
+        "ENV_NAME": "TwoRoomsMultiTask5",
+        "NETWORK_NAME": "MTQNet",  # Options: MTQNet, MTQNetWithBottleneck, MTQNetWithTaskReps
         "SEED": [0],
         "NUM_SEEDS": 1, # Leave as 1 otherwise wandb logging will not work properly
-        "WANDB_MODE": "disabled",  # set to online to activate wandb
+        "WANDB_MODE": "online",  # set to online to activate wandb
         "ENTITY": "odiamond-personal",
         "PROJECT": "feature-attainment-purejaxrl",
         "PRINT_METRICS": True,  # set to False to disable printing metrics
@@ -616,12 +904,12 @@ def main():
 
     for seed in seeds:
         config["SEED"] = seed
-        current_time = datetime.datetime.now().strftime("%y-%d-%H-%M-%S")
-        wandb.init(
+        config["CURRENT_TIME"] = datetime.datetime.now().strftime("%y-%m-%d-%H-%M-%S")
+        run = wandb.init(
             entity=config["ENTITY"],
             project=config["PROJECT"],
             tags=["DQN_MULTITASK", config["ENV_NAME"].upper(), f"jax_{jax.__version__}"],
-            name=f'purejaxrl_dqn_multitask_{config["ENV_NAME"]}_{current_time}',
+            name=f'dqn_multitask_{config["ENV_NAME"]}_{config["NETWORK_NAME"]}_{config["CURRENT_TIME"]}',
             config=config,
             mode=config["WANDB_MODE"],
         )
@@ -634,7 +922,8 @@ def main():
         # This is a quick fix for now but eventually we might want to vmap the plotting over all of the seeds. 
         # NOTE This will currently fail if we try to squeeze after runnning with more than 1 random seed
         params = jax.tree_util.tree_map(lambda x: x.squeeze(axis=0), runner_state[0].params)
-        plot_qvals(params, rng, config)
+        plot_and_store_data(params, rng, config)
+        run.finish()
 
 if __name__ == "__main__":
     main()

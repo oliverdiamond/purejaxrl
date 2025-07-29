@@ -18,17 +18,20 @@ from gymnax.environments import environment, spaces
 @struct.dataclass
 class EnvState(environment.EnvState):
     time: int
-    task: jax.Array
+    start_loc: jax.Array
     hallway_loc: jax.Array
+    goal_loc: jax.Array
+    task: jax.Array
     agent_loc: jax.Array
+
 
 @struct.dataclass
 class EnvParams(environment.EnvParams):
     n_tasks: int = 3
     max_steps_in_episode: int = 500
-    goal_loc: jax.Array = field(default_factory=lambda: jnp.array([0, 8]))
-    start_loc: jax.Array = field(default_factory=lambda: jnp.array([0, 0]))
+    start_locs: jax.Array = field(default_factory=lambda: jnp.array([[0, 0]]))
     hallway_locs: jax.Array = field(default_factory=lambda: jnp.array([[0, 4], [4, 4], [8, 4]]))
+    goal_locs: jax.Array = field(default_factory=lambda: jnp.array([[0, 8], [4, 8], [8, 8]]))
 
 
 class TwoRoomsMultiTask(environment.Environment[EnvState, EnvParams]):
@@ -38,8 +41,8 @@ class TwoRoomsMultiTask(environment.Environment[EnvState, EnvParams]):
         super().__init__()
         self.directions = jnp.array([[-1, 0], [0, 1], [1, 0], [0, -1]])
         self.directions_str = ["up", "right", "down", "left"]
-        self.N: int = 5  # Hardcoded for now, could be parameterized later
-        # TODO Hardcode start loc, goal loc and initalize hallway_locs based on N
+        self.N: int = 9  # Hardcoded for now, can put in config and pass as an argument to make so you can then set the envparams accordingly in default params.
+        # TODO set start loc, goal loc and initalize hallway_locs based on N
 
 
     @property
@@ -70,12 +73,14 @@ class TwoRoomsMultiTask(environment.Environment[EnvState, EnvParams]):
         state = EnvState(
             time=state.time + 1,
             task=state.task,
+            start_loc=state.start_loc,
             hallway_loc=state.hallway_loc,
+            goal_loc=state.goal_loc,
             agent_loc=agent_loc_new,
         )
 
         reward = jnp.asarray(
-            jnp.array_equal(state.agent_loc, params.goal_loc),
+            jnp.array_equal(state.agent_loc, state.goal_loc),
             dtype=jnp.float32,
         )
 
@@ -94,17 +99,29 @@ class TwoRoomsMultiTask(environment.Environment[EnvState, EnvParams]):
         self, key: jax.Array, params: EnvParams
     ) -> tuple[jax.Array, EnvState]:
         """Reset environment state by sampling hallway and start loc."""
-        # Reset both the agents position (deterministic) and the hallway location (random)
+        # Reset agent, hallway and goal location
+        start_idx = jax.random.randint(
+            key, (), 0, params.start_locs.shape[0]
+        )
+        start_loc = params.start_locs[start_idx]
+        
         hallway_idx = jax.random.randint(
             key, (), 0, params.hallway_locs.shape[0]
         )
         hallway_loc = params.hallway_locs[hallway_idx]
 
+        goal_idx = jax.random.randint(
+            key, (), 0, params.goal_locs.shape[0]
+        )
+        goal_loc = params.goal_locs[goal_idx]
+
         state = EnvState(
             time=0,
-            task=hallway_idx,
+            task=goal_idx,
+            start_loc=start_loc,
             hallway_loc=hallway_loc,
-            agent_loc=params.start_loc,
+            agent_loc=start_loc,
+            goal_loc=goal_loc,
     )
 
         return self.get_obs(state, params), state
@@ -113,7 +130,7 @@ class TwoRoomsMultiTask(environment.Environment[EnvState, EnvParams]):
         """Check whether state is terminal."""
         done_steps = self.is_truncated(state, params)
         # Check if agent has found the goal
-        done_goal = jnp.array_equal(state.agent_loc, params.goal_loc)
+        done_goal = jnp.array_equal(state.agent_loc, state.goal_loc)
         
         done = jnp.logical_or(done_goal, done_steps)
         return done
@@ -178,7 +195,19 @@ class TwoRoomsMultiTask(environment.Environment[EnvState, EnvParams]):
         """State space of the environment."""
         return spaces.Dict(
             {
+                "start_loc": spaces.Box(
+                    0,
+                    self.N,
+                    (2,),
+                    jnp.float32,
+                ),
                 "hallway_loc": spaces.Box(
+                    0,
+                    self.N,
+                    (2,),
+                    jnp.float32,
+                ),
+                "goal_loc": spaces.Box(
                     0,
                     self.N,
                     (2,),
@@ -195,8 +224,68 @@ class TwoRoomsMultiTask(environment.Environment[EnvState, EnvParams]):
             }
         )
 
-class TwoRoomsMultiTask5(TwoRoomsMultiTask):
-    """Two Rooms environment with 5x5 grid."""
+
+class TwoRoomsMultiTaskEasy(TwoRoomsMultiTask):
+    """Multitask TwoRooms environment where the task is the hallway state and the goal and start states are fixed."""
+    def __init__(
+        self,
+    ):
+        super().__init__()
+        self.directions = jnp.array([[-1, 0], [0, 1], [1, 0], [0, -1]])
+        self.directions_str = ["up", "right", "down", "left"]
+        self.N: int = 9  # Hardcoded for now, could be parameterized later
+        # TODO Hardcode start loc, goal loc and initalize hallway_locs based on N
+
+
+    @property
+    def default_params(self) -> EnvParams:
+        # Default environment parameters
+        return EnvParams(
+            n_tasks=3,
+            max_steps_in_episode=500,
+            start_locs=jnp.array([[0, 0]]),
+            hallway_locs=jnp.array([[0, 4], [4, 4], [8, 4]]),
+            goal_locs=jnp.array([[0, 8]])
+        )
+
+    def reset_env(
+        self, key: jax.Array, params: EnvParams
+    ) -> tuple[jax.Array, EnvState]:
+        """Reset environment state by sampling hallway and start loc."""
+        # Reset agent, hallway and goal location
+        start_idx = jax.random.randint(
+            key, (), 0, params.start_locs.shape[0]
+        )
+        start_loc = params.start_locs[start_idx]
+        
+        hallway_idx = jax.random.randint(
+            key, (), 0, params.hallway_locs.shape[0]
+        )
+        hallway_loc = params.hallway_locs[hallway_idx]
+
+        goal_idx = jax.random.randint(
+            key, (), 0, params.goal_locs.shape[0]
+        )
+        goal_loc = params.goal_locs[goal_idx]
+
+        state = EnvState(
+            time=0,
+            task=hallway_idx, # The task is the hallway state
+            start_loc=start_loc,
+            hallway_loc=hallway_loc,
+            agent_loc=start_loc,
+            goal_loc=goal_loc,
+        )
+        return self.get_obs(state, params), state
+
+    @property
+    def name(self) -> str:
+        """Environment name."""
+        return "TwoRoomsMultiTaskEasy"
+
+
+class TwoRoomsMultiTaskEasy5(TwoRoomsMultiTaskEasy):
+    """Two Rooms easy environment with 5x5 grid."""
     
     def __init__(self):
         super().__init__()
@@ -206,14 +295,20 @@ class TwoRoomsMultiTask5(TwoRoomsMultiTask):
     def default_params(self) -> EnvParams:
         # Default environment parameters
         return EnvParams(
+            n_tasks=3,
             max_steps_in_episode=500,
-            goal_loc=jnp.array([0, 4]),
-            start_loc=jnp.array([0, 0]),
+            start_locs=jnp.array([[0, 0]]),
             hallway_locs=jnp.array([[0, 2], [2, 2], [4, 2]]),
+            goal_locs=jnp.array([[0, 4]])
         )
 
-class TwoRoomsMultiTask15(TwoRoomsMultiTask):
-    """Two Rooms environment with 5x5 grid."""
+    @property
+    def name(self) -> str:
+        """Environment name."""
+        return "TwoRoomsMultiTaskEasy5"
+
+class TwoRoomsMultiTaskEasy15(TwoRoomsMultiTaskEasy):
+    """Two Rooms easy environment with 5x5 grid."""
     
     def __init__(self):
         super().__init__()
@@ -223,8 +318,61 @@ class TwoRoomsMultiTask15(TwoRoomsMultiTask):
     def default_params(self) -> EnvParams:
         # Default environment parameters
         return EnvParams(
+            n_tasks=3,
             max_steps_in_episode=500,
-            goal_loc=jnp.array([0, 14]),
-            start_loc=jnp.array([0, 0]),
-            hallway_locs=jnp.array([[0,7], [7, 7], [14, 7]])
-            )
+            start_locs=jnp.array([[0, 0]]),
+            hallway_locs=jnp.array([[0, 7], [7, 7], [14, 7]]),
+            goal_locs=jnp.array([[0, 14]])
+        )
+
+    @property
+    def name(self) -> str:
+        """Environment name."""
+        return "TwoRoomsMultiTaskEasy15"
+    
+    
+class TwoRoomsMultiTask5(TwoRoomsMultiTask):
+    """Two Rooms easy environment with 5x5 grid."""
+    
+    def __init__(self):
+        super().__init__()
+        self.N = 5
+
+    @property
+    def default_params(self) -> EnvParams:
+        # Default environment parameters
+        return EnvParams(
+            n_tasks=3,
+            max_steps_in_episode=500,
+            start_locs=jnp.array([[0, 0]]),
+            hallway_locs=jnp.array([[0, 2], [2, 2], [4, 2]]),
+            goal_locs=jnp.array([[0, 4], [2, 4], [4, 4]])
+        )
+
+    @property
+    def name(self) -> str:
+        """Environment name."""
+        return "TwoRoomsMultiTask5"
+    
+class TwoRoomsMultiTask15(TwoRoomsMultiTask):
+    """Two Rooms easy environment with 5x5 grid."""
+    
+    def __init__(self):
+        super().__init__()
+        self.N = 15
+
+    @property
+    def default_params(self) -> EnvParams:
+        # Default environment parameters
+        return EnvParams(
+            n_tasks=3,
+            max_steps_in_episode=500,
+            start_locs=jnp.array([[0, 0]]),
+            hallway_locs=jnp.array([[0, 7], [7, 7], [14, 7]]),
+            goal_locs=jnp.array([[0, 14], [7, 14], [14, 14]])
+        )
+
+    @property
+    def name(self) -> str:
+        """Environment name."""
+        return "TwoRoomsMultiTask15"

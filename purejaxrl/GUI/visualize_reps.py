@@ -12,6 +12,7 @@ Example:
 import pickle
 import sys
 import os
+import io
 from typing import Dict, List, Tuple, Any, Optional
 import numpy as np
 import streamlit as st
@@ -92,7 +93,7 @@ def normalize_features(features: np.ndarray, min_vals: np.ndarray, max_vals: np.
 
 
 def create_feature_visualization(features: np.ndarray, title: str, 
-                                feature_names: Optional[List[str]] = None, compact: bool = False,
+                                feature_names: Optional[List[str]] = None,
                                 raw_features: Optional[np.ndarray] = None,
                                 min_vals: Optional[np.ndarray] = None,
                                 max_vals: Optional[np.ndarray] = None) -> Figure:
@@ -104,18 +105,14 @@ def create_feature_visualization(features: np.ndarray, title: str,
     n_bins = 256
     cmap = LinearSegmentedColormap.from_list('feature_map', colors, N=n_bins)
     
-    # Adjust size based on compact mode and feature type
-    if compact:
-        # Make Q-values (4 features) and shared rep much smaller in separate mode
-        if len(features) <= 8:  # Q-values or small shared rep
-            fig, ax = plt.subplots(figsize=(max(2, len(features) * 0.25), 0.6))
-            fontsize = max(5, min(8, 25 / len(features)))
-        else:  # Larger feature arrays
-            fig, ax = plt.subplots(figsize=(max(3, len(features) * 0.15), 0.8))
-            fontsize = max(4, min(6, 30 / len(features)))
-    else:
-        fig, ax = plt.subplots(figsize=(max(8, len(features) * 0.5), 2))
-        fontsize = 8
+    # Fixed width of 10 inches, calculate square size to maintain aspect ratio
+    fig_width = 10.0
+    square_size = 2*(fig_width / len(features))  # Calculate square size based on number of features
+    fig_height = square_size
+    fig, ax = plt.subplots(figsize=(fig_width, fig_height), dpi=300)
+
+    # Font size based on square size, but clamped for readability
+    fontsize = max(8, min(16, square_size * 6))
     
     # Create rectangles for each feature
     for i, (norm_val, display_val) in enumerate(zip(features, display_features)):
@@ -145,14 +142,14 @@ def create_feature_visualization(features: np.ndarray, title: str,
     
     ax.set_xlim(0, len(features))
     ax.set_ylim(0, 1)
-    ax.set_title(title, fontsize=9 if compact else 12, pad=6)
+    ax.set_title(title, fontsize=12, pad=6)
     ax.set_xticks(np.arange(len(features)) + 0.5)
     
     if feature_names:
         ax.set_xticklabels(feature_names, rotation=45, ha='right', fontsize=7)
     else:
-        # Show fewer labels if compact and many features
-        if compact and len(features) > 10:
+        # Show fewer labels if many features
+        if len(features) > 10:
             step = max(1, len(features) // 8)
             tick_indices = range(0, len(features), step)
             ax.set_xticks([i + 0.5 for i in tick_indices])
@@ -161,7 +158,7 @@ def create_feature_visualization(features: np.ndarray, title: str,
             ax.set_xticklabels([f'{i}' for i in range(len(features))], fontsize=7)
     
     ax.set_yticks([])
-    ax.set_aspect('equal')
+    #ax.set_aspect('equal')
     
     plt.tight_layout()
     return fig
@@ -203,17 +200,18 @@ def create_combined_visualization(activation_data: Dict[str, List[np.ndarray]],
             min_vals = normalization_ranges[activation_type]['min']
             max_vals = normalization_ranges[activation_type]['max']
         
-        # Create figure with space for thumbnails on the left
-        thumbnail_width = 0.8 if grid_thumbnails else 0
-        fig_width = max(8, n_features * 0.3) + thumbnail_width
-        fig, ax = plt.subplots(figsize=(fig_width, max(4, n_obs * 0.5)))
+        # Create figure with space for thumbnails on the left - made much larger
+        thumbnail_width = 1.2 if grid_thumbnails else 0  # Increased thumbnail space
+        fig_width = max(16, n_features * 0.8) + thumbnail_width  # Much wider
+        fig_height = max(8, n_obs * 1.2)  # Much taller
+        fig, ax = plt.subplots(figsize=(fig_width, fig_height), dpi=150)  # Higher DPI
         
         # Adjust subplot to make room for thumbnails
         if grid_thumbnails:
-            plt.subplots_adjust(left=0.12)
+            plt.subplots_adjust(left=0.08)  # Adjusted for larger thumbnails
         
         # Create heatmap (offset by thumbnail width if needed)
-        x_offset = thumbnail_width * 1.2 if grid_thumbnails else 0
+        x_offset = thumbnail_width * 1.5 if grid_thumbnails else 0  # Increased offset
         
         for obs_idx in range(n_obs):
             for feat_idx in range(n_features):
@@ -242,7 +240,7 @@ def create_combined_visualization(activation_data: Dict[str, List[np.ndarray]],
                     text_color = 'black'
                 else:
                     text_color = 'white' if norm_val < 0.3 or norm_val > 0.7 else 'black'
-                fontsize = min(8, max(4, 60 / max(n_obs, n_features)))
+                fontsize = min(12, max(8, 120 / max(n_obs, n_features)))  # Larger font for bigger plots
                 ax.text(feat_idx + x_offset + 0.5, n_obs - obs_idx - 0.5, f'{raw_val:.2f}', 
                        ha='center', va='center', fontsize=fontsize, 
                        color=text_color, weight='bold')
@@ -306,40 +304,47 @@ def main():
     activations, metadata = load_data(results_dir)
     
     # Display metadata
-    with st.expander("Dataset Information", expanded=False):
+    with st.expander("Experiment Information", expanded=False):
         col1, col2 = st.columns(2)
         
         with col1:
             st.subheader("Environment Metadata")
             st.write(f"**Grid Size:** {metadata['grid_size']}×{metadata['grid_size']}")
-            st.write(f"**Number of Tasks:** {metadata.get('num_hallways', metadata.get('num_goals', 'Unknown'))}")
+            
+            # Determine number of tasks based on environment type
+            config = metadata['config']
+            is_easy_env = "Easy" in config.get("ENV_NAME", "")
+            num_tasks = metadata['num_hallways'] if is_easy_env else metadata['num_goals']
+            st.write(f"**Number of Tasks:** {num_tasks}")
+            
             st.write(f"**Goal Locations:** {metadata['goal_locs']}")
             st.write(f"**Start Location:** {metadata['start_loc']}")
             st.write(f"**Hallway Locations:** {metadata['hallway_locs']}")
         
         with col2:
-            st.subheader("Model Configuration")
+            st.subheader("Experiment Configuration")
             config = metadata['config']
-            st.write(f"**Network Type:** {config.get('NETWORK_NAME', 'Unknown')}")
-            st.write(f"**Shared Expand:** {config.get('N_SHARED_EXPAND', 'N/A')}")
-            st.write(f"**Shared Bottleneck:** {config.get('N_SHARED_BOTTLENECK', 'N/A')}")
-            st.write(f"**Task Features:** {config.get('N_FEATURES_PER_TASK', 'N/A')}")
-            st.write(f"**Conv1 Features:** {config.get('N_FEATURES_CONV1', 'N/A')}")
-            st.write(f"**Conv2 Features:** {config.get('N_FEATURES_CONV2', 'N/A')}")
-            st.write(f"**Learning Rate:** {config.get('LR', 'N/A')}")
-            st.write(f"**Seed:** {config.get('SEED', 'N/A')}")
+            
+            # Display full config in a structured way
+            for key, value in config.items():
+                # Format the key to be more readable
+                formatted_key = key.replace('_', ' ').title()
+                st.write(f"**{formatted_key}:** {value}")
     
     # Initialize session state
     if 'grid_configs' not in st.session_state:
-        # Default: one grid for first goal-hallway combination
+        # Default: one grid for each (goal, hallway) combination
         st.session_state.grid_configs = []
         if metadata['num_goals'] > 0 and metadata['num_hallways'] > 0:
             start_loc = tuple(metadata['start_loc'])
-            st.session_state.grid_configs.append({
-                'goal_idx': 0,
-                'hallway_idx': 0,
-                'agent_loc': start_loc
-            })
+            # Create a grid for each goal-hallway combination
+            for goal_idx in range(metadata['num_goals']):
+                for hallway_idx in range(metadata['num_hallways']):
+                    st.session_state.grid_configs.append({
+                        'goal_idx': goal_idx,
+                        'hallway_idx': hallway_idx,
+                        'agent_loc': start_loc
+                    })
     
     # Determine if network has task-specific representations
     config = metadata['config']
@@ -490,7 +495,7 @@ def main():
             st.write(f"**Grid {grid_idx + 1}**")
             
             # Create side-by-side layout for this grid
-            grid_col, activation_col = st.columns([1, 2])
+            grid_col, activation_col = st.columns([0.5, 2])
             
             with grid_col:
                 # Goal selection
@@ -526,11 +531,11 @@ def main():
                     metadata['grid_size'], agent_loc, goal_loc, hallway_loc
                 )
                 
-                fig, ax = plt.subplots(figsize=(2.5, 2.5))  # Even smaller grid size
+                fig, ax = plt.subplots(figsize=(1.8, 1.8))  # Smaller grid size
                 ax.imshow(grid_vis)
                 ax.set_xticks(range(metadata['grid_size']))
                 ax.set_yticks(range(metadata['grid_size']))
-                ax.tick_params(labelsize=7)
+                ax.tick_params(labelsize=6)
                 
                 st.pyplot(fig)
                 plt.close(fig)
@@ -567,7 +572,6 @@ def main():
                         fig = create_feature_visualization(
                             normalized_shared, 
                             f"Shared Rep",
-                            compact=True,
                             raw_features=shared_rep,
                             min_vals=shared_rep_min,
                             max_vals=shared_rep_max
@@ -586,7 +590,6 @@ def main():
                                 fig = create_feature_visualization(
                                     normalized_task,
                                     f"Task {task_idx} Rep",
-                                    compact=True,
                                     raw_features=task_rep,
                                     min_vals=task_range['min'],
                                     max_vals=task_range['max']
@@ -644,7 +647,7 @@ def main():
         st.write("**All Observations**")
         
         # Create columns for grids (show multiple per row)
-        grids_per_row = min(4, len(st.session_state.grid_configs))
+        grids_per_row = min(9, len(st.session_state.grid_configs))  # Maximum 6 columns
         if grids_per_row > 0:
             grid_cols = st.columns(grids_per_row)
             
@@ -684,13 +687,14 @@ def main():
                         metadata['grid_size'], agent_loc, goal_loc, hallway_loc
                     )
                     
-                    fig, ax = plt.subplots(figsize=(2, 2))  # Very small for combined view
+                    fig, ax = plt.subplots(figsize=(1.5, 1.5))  # Very small for combined view
                     ax.imshow(grid_vis)
                     ax.set_xticks(range(metadata['grid_size']))
                     ax.set_yticks(range(metadata['grid_size']))
-                    ax.tick_params(labelsize=6)
+                    ax.tick_params(labelsize=5)
                     
                     st.pyplot(fig)
+                    
                     plt.close(fig)
                     
                     # Agent location controls (very compact)
@@ -739,11 +743,13 @@ def main():
         
         for activation_type, fig in combined_figures.items():
             if activation_type == 'Shared Representations' and show_shared_rep:
-                st.pyplot(fig)
+                plt.savefig(f"{results_dir}/shared_rep_combined.png")
+                st.pyplot(fig, use_container_width=False)
                 plt.close(fig)
             elif activation_type.startswith('Task') and show_task_rep:
                 task_idx = int(activation_type.split()[1])
                 if task_idx in selected_tasks:
+                    plt.savefig(f"{results_dir}/task_{task_idx}_rep_combined.png")
                     st.pyplot(fig)
                     plt.close(fig)
 

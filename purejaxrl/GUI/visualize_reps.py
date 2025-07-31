@@ -313,8 +313,8 @@ def main():
             
             # Determine number of tasks based on environment type
             config = metadata['config']
-            is_easy_env = "Easy" in config.get("ENV_NAME", "")
-            num_tasks = metadata['num_hallways'] if is_easy_env else metadata['num_goals']
+            hallway_is_task = "HallwayAsTask" in config.get("ENV_NAME", "")
+            num_tasks = metadata['num_hallways'] if hallway_is_task else metadata['num_goals']
             st.write(f"**Number of Tasks:** {num_tasks}")
             
             st.write(f"**Goal Locations:** {metadata['goal_locs']}")
@@ -366,9 +366,9 @@ def main():
             if show_task_rep:
                 # Determine number of tasks based on environment type
                 config = metadata['config']
-                is_easy_env = "Easy" in config.get("ENV_NAME", "")
-                num_tasks = metadata['num_hallways'] if is_easy_env else metadata['num_goals']
-                
+                hallway_is_task = "HallwayAsTask" in config.get("ENV_NAME", "")
+                num_tasks = metadata['num_hallways'] if hallway_is_task else metadata['num_goals']
+
                 selected_tasks = st.multiselect(
                     "Select Task Representations",
                     options=list(range(num_tasks)),
@@ -411,8 +411,8 @@ def main():
     
     # Determine number of tasks based on environment type
     config = metadata['config']
-    is_easy_env = "Easy" in config.get("ENV_NAME", "")
-    num_tasks = metadata['num_hallways'] if is_easy_env else metadata['num_goals']
+    hallway_is_task = "HallwayAsTask" in config.get("ENV_NAME", "")
+    num_tasks = metadata['num_hallways'] if hallway_is_task else metadata['num_goals']
     
     if has_task_reps:
         all_task_reps = {task_idx: [] for task_idx in range(num_tasks)}

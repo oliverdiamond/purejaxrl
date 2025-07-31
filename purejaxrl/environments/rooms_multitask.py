@@ -29,12 +29,16 @@ class EnvState(environment.EnvState):
 class EnvParams(environment.EnvParams):
     n_tasks: int = 3
     max_steps_in_episode: int = 500
-    start_locs: jax.Array = field(default_factory=lambda: jnp.array([[0, 0]]))
+    start_locs: jax.Array = field(default_factory=lambda: jnp.array([[0, 0], [4, 0], [8, 0]]))
     hallway_locs: jax.Array = field(default_factory=lambda: jnp.array([[0, 4], [4, 4], [8, 4]]))
     goal_locs: jax.Array = field(default_factory=lambda: jnp.array([[0, 8], [4, 8], [8, 8]]))
 
 
-class TwoRoomsMultiTask(environment.Environment[EnvState, EnvParams]):
+class TwoRoomsMT(environment.Environment[EnvState, EnvParams]):
+    """ 
+    Multitask TwoRooms environment where the task is the goal state and the start and hallway states are both random each episode.
+    Grid is 9x9. See TwoRoomsMT5 and TwoRoomsMT15 for identical envs with different sized grids.
+    """
     def __init__(
         self,
     ):
@@ -175,7 +179,7 @@ class TwoRoomsMultiTask(environment.Environment[EnvState, EnvParams]):
     @property
     def name(self) -> str:
         """Environment name."""
-        return "TwoRoomsMultiTask"
+        return "TwoRoomsMT"
 
     @property
     def num_actions(self) -> int:
@@ -225,7 +229,113 @@ class TwoRoomsMultiTask(environment.Environment[EnvState, EnvParams]):
         )
 
 
-class TwoRoomsMultiTaskEasy(TwoRoomsMultiTask):
+class TwoRoomsMT5(TwoRoomsMT):
+    """Two Rooms environment with 5x5 grid."""
+    
+    def __init__(self):
+        super().__init__()
+        self.N = 5
+
+    @property
+    def default_params(self) -> EnvParams:
+        # Default environment parameters
+        return EnvParams(
+            n_tasks=3,
+            max_steps_in_episode=500,
+            start_locs=jnp.array([[0, 0], [2, 0], [4, 0]]),
+            hallway_locs=jnp.array([[0, 2], [2, 2], [4, 2]]),
+            goal_locs=jnp.array([[0, 4], [2, 4], [4, 4]])
+        )
+
+    @property
+    def name(self) -> str:
+        """Environment name."""
+        return "TwoRoomsMT5"
+
+class TwoRoomsMT15(TwoRoomsMT):
+    """Two Rooms environment with 15x15 grid."""
+
+    def __init__(self):
+        super().__init__()
+        self.N = 15
+
+    @property
+    def default_params(self) -> EnvParams:
+        # Default environment parameters
+        return EnvParams(
+            n_tasks=3,
+            max_steps_in_episode=500,
+            start_locs=jnp.array([[0, 0], [7, 0], [14, 0]]),
+            hallway_locs=jnp.array([[0, 7], [7, 7], [14, 7]]),
+            goal_locs=jnp.array([[0, 14], [7, 14], [14, 14]])
+        )
+
+    @property
+    def name(self) -> str:
+        """Environment name."""
+        return "TwoRoomsMT15"
+
+
+class TwoRoomsMTFixedStart5(TwoRoomsMT):
+    """
+    Two Rooms environment with:
+    - Fixed start location
+    - Random hallway location each episode
+    - 5x5 grid.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.N = 5
+
+    @property
+    def default_params(self) -> EnvParams:
+        # Default environment parameters
+        return EnvParams(
+            n_tasks=3,
+            max_steps_in_episode=500,
+            start_locs=jnp.array([[2, 0]]),
+            hallway_locs=jnp.array([[0, 2], [2, 2], [4, 2]]),
+            goal_locs=jnp.array([[0, 4], [2, 4], [4, 4]])
+        )
+
+    @property
+    def name(self) -> str:
+        """Environment name."""
+        return "TwoRoomsMTFixedStart5"
+
+
+class TwoRoomsMTFixedHallway5(TwoRoomsMT):
+    """
+    Two Rooms environment with:
+    - Fixed hallway location
+    - Random start location each episode
+    - 5x5 grid.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.N = 5
+
+    @property
+    def default_params(self) -> EnvParams:
+        # Default environment parameters
+        return EnvParams(
+            n_tasks=3,
+            max_steps_in_episode=500,
+            start_locs=jnp.array([[0, 0], [2, 0], [4, 0]]),
+            hallway_locs=jnp.array([[0, 2]]),
+            goal_locs=jnp.array([[0, 4], [2, 4], [4, 4]])
+        )
+
+    @property
+    def name(self) -> str:
+        """Environment name."""
+        return "TwoRoomsMTFixedHallway5"
+
+
+
+class TwoRoomsMTHallwayAsTask(TwoRoomsMT):
     """Multitask TwoRooms environment where the task is the hallway state and the goal and start states are fixed."""
     def __init__(
         self,
@@ -243,7 +353,7 @@ class TwoRoomsMultiTaskEasy(TwoRoomsMultiTask):
         return EnvParams(
             n_tasks=3,
             max_steps_in_episode=500,
-            start_locs=jnp.array([[0, 0]]),
+            start_locs=jnp.array([[4, 0]]),
             hallway_locs=jnp.array([[0, 4], [4, 4], [8, 4]]),
             goal_locs=jnp.array([[0, 8]])
         )
@@ -281,12 +391,12 @@ class TwoRoomsMultiTaskEasy(TwoRoomsMultiTask):
     @property
     def name(self) -> str:
         """Environment name."""
-        return "TwoRoomsMultiTaskEasy"
+        return "TwoRoomsMTHallwayAsTask"
 
 
-class TwoRoomsMultiTaskEasy5(TwoRoomsMultiTaskEasy):
-    """Two Rooms easy environment with 5x5 grid."""
-    
+class TwoRoomsMTHallwayAsTask5(TwoRoomsMTHallwayAsTask):
+    """Multitask TwoRooms environment where the task is the hallway state and the goal and start states are fixed - 5x5 grid."""
+
     def __init__(self):
         super().__init__()
         self.N = 5
@@ -297,7 +407,7 @@ class TwoRoomsMultiTaskEasy5(TwoRoomsMultiTaskEasy):
         return EnvParams(
             n_tasks=3,
             max_steps_in_episode=500,
-            start_locs=jnp.array([[0, 0]]),
+            start_locs=jnp.array([[2, 0]]),
             hallway_locs=jnp.array([[0, 2], [2, 2], [4, 2]]),
             goal_locs=jnp.array([[0, 4]])
         )
@@ -305,10 +415,10 @@ class TwoRoomsMultiTaskEasy5(TwoRoomsMultiTaskEasy):
     @property
     def name(self) -> str:
         """Environment name."""
-        return "TwoRoomsMultiTaskEasy5"
+        return "TwoRoomsMTHallwayAsTask5"
 
-class TwoRoomsMultiTaskEasy15(TwoRoomsMultiTaskEasy):
-    """Two Rooms easy environment with 5x5 grid."""
+class TwoRoomsMTHallwayAsTask15(TwoRoomsMTHallwayAsTask):
+    """Multitask TwoRooms environment where the task is the hallway state and the goal and start states are fixed - 15x15 grid."""
     
     def __init__(self):
         super().__init__()
@@ -320,7 +430,7 @@ class TwoRoomsMultiTaskEasy15(TwoRoomsMultiTaskEasy):
         return EnvParams(
             n_tasks=3,
             max_steps_in_episode=500,
-            start_locs=jnp.array([[0, 0]]),
+            start_locs=jnp.array([[7, 0]]),
             hallway_locs=jnp.array([[0, 7], [7, 7], [14, 7]]),
             goal_locs=jnp.array([[0, 14]])
         )
@@ -328,12 +438,12 @@ class TwoRoomsMultiTaskEasy15(TwoRoomsMultiTaskEasy):
     @property
     def name(self) -> str:
         """Environment name."""
-        return "TwoRoomsMultiTaskEasy15"
+        return "TwoRoomsMTHallwayAsTask15"
     
-    
-class TwoRoomsMultiTask5(TwoRoomsMultiTask):
-    """Two Rooms easy environment with 5x5 grid."""
-    
+
+class TwoRoomsMTHallwayAsTaskRandomStart5(TwoRoomsMTHallwayAsTask):
+    """Multitask TwoRooms environment where the task is the hallway state and the goal and start states are fixed - 5x5 grid."""
+
     def __init__(self):
         super().__init__()
         self.N = 5
@@ -344,35 +454,12 @@ class TwoRoomsMultiTask5(TwoRoomsMultiTask):
         return EnvParams(
             n_tasks=3,
             max_steps_in_episode=500,
-            start_locs=jnp.array([[0, 0]]),
+            start_locs=jnp.array([[0, 0], [2, 0], [4, 0]]),
             hallway_locs=jnp.array([[0, 2], [2, 2], [4, 2]]),
-            goal_locs=jnp.array([[0, 4], [2, 4], [4, 4]])
+            goal_locs=jnp.array([[0, 4]])
         )
 
     @property
     def name(self) -> str:
         """Environment name."""
-        return "TwoRoomsMultiTask5"
-    
-class TwoRoomsMultiTask15(TwoRoomsMultiTask):
-    """Two Rooms easy environment with 5x5 grid."""
-    
-    def __init__(self):
-        super().__init__()
-        self.N = 15
-
-    @property
-    def default_params(self) -> EnvParams:
-        # Default environment parameters
-        return EnvParams(
-            n_tasks=3,
-            max_steps_in_episode=500,
-            start_locs=jnp.array([[0, 0]]),
-            hallway_locs=jnp.array([[0, 7], [7, 7], [14, 7]]),
-            goal_locs=jnp.array([[0, 14], [7, 14], [14, 14]])
-        )
-
-    @property
-    def name(self) -> str:
-        """Environment name."""
-        return "TwoRoomsMultiTask15"
+        return "TwoRoomsMTHallwayAsTaskRandomStart5"

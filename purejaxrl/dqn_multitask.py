@@ -2,6 +2,9 @@ import os
 import datetime
 import copy
 import math 
+import json
+import argparse
+import itertools
 
 import wandb
 import jax
@@ -587,14 +590,14 @@ def plot_and_store_data(network_params, rng, config):
     all_q_values = {}
     all_activations = {}
     
-    # Determine if this is an "Easy" environment (task defined by hallway) or regular (task defined by goal)
-    is_easy_env = "Easy" in config["ENV_NAME"]
+    # Determine if this is (task defined by hallway) or regular (task defined by goal)
+    hallway_is_task = "HallwayAsTask" in config["ENV_NAME"]
     
     # Unified loop: iterate over all (goal, hallway) combinations
     for goal_idx in range(num_goals):
         for hallway_idx in range(num_hallways):
             # Determine task based on environment type
-            if is_easy_env:
+            if hallway_is_task:
                 task = jnp.array([hallway_idx])  # Task defined by hallway
             else:
                 task = jnp.array([goal_idx])  # Task defined by goal
@@ -788,7 +791,7 @@ def plot_and_store_data(network_params, rng, config):
         ax.set_yticklabels([])
         title_fontsize = max(10, min(16, 100 / N))  # Dynamic title font size
         
-        if is_easy_env:
+        if hallway_is_task:
             ax.set_title(f'Task {hallway_idx}: Hallway at ({hallway_loc[0]}, {hallway_loc[1]})', 
                          fontsize=title_fontsize)
         else:
@@ -867,71 +870,106 @@ def plot_and_store_data(network_params, rng, config):
             "activations_file": data_path,
         })
 
-    print(f"Q-values visualization saved as '{fig_path}'")
-    print(f"Activations data saved as '{data_path}'")
-    print(f"Metadata saved as JSON:")
-    print(f"  - {metadata_json_data}")
+def load_config(filename):
+    """Load configuration from a JSON file."""
+    with open(f"purejaxrl/configs/{filename}", 'r') as f:
+        config = json.load(f)
+    return config
 
-    print(f"Analyzed {num_goals} goal(s) x {num_hallways} hallway(s) = {len(all_q_values)} combinations for {N}x{N} grid")
+
+def generate_config_combinations(base_config):
+    """
+    Generate all unique combinations of configurations based on list parameters.
+    
+    Args:
+        base_config: Dictionary with potentially list-valued parameters
+        
+    Returns:
+        List of config dictionaries, one for each unique combination
+    """
+    # Find all parameters that are lists
+    list_params = {}
+    scalar_params = {}
+    
+    for key, value in base_config.items():
+        if isinstance(value, list):
+            list_params[key] = value
+        else:
+            scalar_params[key] = value
+    
+    # If no list parameters, return the original config
+    if not list_params:
+        return [base_config]
+    
+    # Generate all combinations of list parameters
+    param_names = list(list_params.keys())
+    param_values = list(list_params.values())
+    
+    configs = []
+    for combination in itertools.product(*param_values):
+        # Create a new config for this combination
+        config = scalar_params.copy()
+        for param_name, param_value in zip(param_names, combination):
+            config[param_name] = param_value
+        configs.append(config)
+    
+    return configs
 
 
 def main():
+    parser = argparse.ArgumentParser(description='DQN Multi-Task Training')
+    parser.add_argument('-c', '--config', type=str, 
+                       default='test.json',
+                       help='Path to configuration JSON file')
+    args = parser.parse_args()
+    
+    # Load base configuration from JSON file
+    base_config = load_config(args.config)
+    
+    # Generate all combinations of configurations
+    config_combinations = generate_config_combinations(base_config)
+    
+    print(f"Running {len(config_combinations)} configuration combination(s)")
+    
+    # Run training for each configuration combination
+    for config_idx, config in enumerate(config_combinations):
+        print(f"\nRunning configuration {config_idx + 1}/{len(config_combinations)}")
+        
+        # Print the current configuration parameters that are different from base
+        if len(config_combinations) > 1:
+            print("Configuration parameters:")
+            for key, value in config.items():
+                if isinstance(base_config.get(key), list):
+                    print(f"  {key}: {value}")
 
-    config = {
-        "NUM_ENVS": 1, # Must be set to 1, handling of truncation fails otherwise (entire batch is currently ignored if any transitions result in truncation)
-        "BUFFER_SIZE": 10000,
-        "BUFFER_BATCH_SIZE": 32,
-        "TOTAL_TIMESTEPS": 100000, # 15e4, #5e5,
-        "EPSILON_START": 0.1, # EPSILON_START==EPSILON_FINISH -> no annealing
-        "EPSILON_FINISH": 0.1,
-        "EPSILON_ANNEAL_TIME": 1, # 1e5, # 2e5,
-        "TARGET_UPDATE_INTERVAL": 64,
-        "LR": 2.5e-4,
-        "LEARNING_STARTS": 1000,
-        "TRAINING_INTERVAL": 1,
-        "N_FEATURES_PER_TASK": 2,
-        "LINEAR_TASK_REP": False,  # If True, use linear task representation, otherwise has activation applied to task representation
-        "N_SHARED_EXPAND": 64,
-        "N_SHARED_BOTTLENECK": 8,
-        "N_FEATURES_CONV1": 32,
-        "N_FEATURES_CONV2": 16,
-        "LR_LINEAR_DECAY": False,
-        "GAMMA": 0.9,
-        "TAU": 1.0,
-        "ENV_NAME": "TwoRoomsMultiTaskEasy5",
-        "NETWORK_NAME": "MTQNetWithBottleneck",  # Options: MTQNet, MTQNetWithBottleneck, MTQNetWithTaskReps
-        "SEED": [0],
-        "NUM_SEEDS": 1, # Leave as 1 otherwise wandb logging will not work properly
-        "WANDB_MODE": "online",  # set to online to activate wandb
-        "ENTITY": "odiamond-personal",
-        "PROJECT": "feature-attainment-purejaxrl",
-        "PRINT_METRICS": True,  # set to False to disable printing metrics
-    }
+        # Handle multiple seeds within each configuration
+        seeds = config["SEED"]  # SEED is always a list in config files
+        
+        for seed in seeds:
+            current_config = config.copy()
+            current_config["SEED"] = seed
+            current_config["CURRENT_TIME"] = datetime.datetime.now().strftime("%y-%m-%d-%H-%M-%S")
+            
+            run = wandb.init(
+                entity=current_config["ENTITY"],
+                project=current_config["PROJECT"],
+                tags=["DQN_MULTITASK", current_config["ENV_NAME"].upper(), f"jax_{jax.__version__}"],
+                name=f'dqn_multitask_{current_config["ENV_NAME"]}_{current_config["NETWORK_NAME"]}_{current_config["CURRENT_TIME"]}',
+                config=current_config,
+                mode=current_config["WANDB_MODE"],
+            )
 
-    seeds = copy.deepcopy(config["SEED"])
-
-    for seed in seeds:
-        config["SEED"] = seed
-        config["CURRENT_TIME"] = datetime.datetime.now().strftime("%y-%m-%d-%H-%M-%S")
-        run = wandb.init(
-            entity=config["ENTITY"],
-            project=config["PROJECT"],
-            tags=["DQN_MULTITASK", config["ENV_NAME"].upper(), f"jax_{jax.__version__}"],
-            name=f'dqn_multitask_{config["ENV_NAME"]}_{config["NETWORK_NAME"]}_{config["CURRENT_TIME"]}',
-            config=config,
-            mode=config["WANDB_MODE"],
-        )
-
-        rng = jax.random.PRNGKey(config["SEED"])
-        rngs = jax.random.split(rng, config["NUM_SEEDS"])
-        train_vjit = jax.jit(jax.vmap(make_train(config)))
-        outs = jax.block_until_ready(train_vjit(rngs))
-        runner_state = outs["runner_state"]
-        # This is a quick fix for now but eventually we might want to vmap the plotting over all of the seeds. 
-        # NOTE This will currently fail if we try to squeeze after runnning with more than 1 random seed
-        params = jax.tree_util.tree_map(lambda x: x.squeeze(axis=0), runner_state[0].params)
-        plot_and_store_data(params, rng, config)
-        run.finish()
+            rng = jax.random.PRNGKey(current_config["SEED"])
+            rngs = jax.random.split(rng, current_config["NUM_SEEDS"])
+            train_vjit = jax.jit(jax.vmap(make_train(current_config)))
+            outs = jax.block_until_ready(train_vjit(rngs))
+            runner_state = outs["runner_state"]
+            # This is a quick fix for now but eventually we might want to vmap the plotting over all of the seeds. 
+            # NOTE This will currently fail if we try to squeeze after runnning with more than 1 random seed
+            params = jax.tree_util.tree_map(lambda x: x.squeeze(axis=0), runner_state[0].params)
+            if config["SAVE_ACTIVATIONS"]:
+                plot_and_store_data(params, rng, current_config)
+            run.finish()
 
 if __name__ == "__main__":
     main()

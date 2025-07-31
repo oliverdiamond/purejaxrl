@@ -24,15 +24,21 @@ from environments.rooms_multitask import EnvState as TwoRoomsEnvStateMultiTask
 class TaskNet(nn.Module):
     action_dim: int
     n_features: int
+    linear_rep: bool = False
 
     def setup(self):
-        self.task_rep = nn.Dense(self.n_features, name="task_rep")
+        if self.linear_rep:
+            self.task_rep = nn.Dense(self.n_features, name="task_rep")
+        else:
+            self.task_rep = nn.Sequential([
+                nn.Dense(self.n_features, name="task_rep"),
+                nn.relu
+            ], name="task_rep")
         self.task_head = nn.Dense(self.action_dim, name="task_head")
     
     def __call__(self, common_input: jnp.ndarray, shared_rep: jnp.ndarray) -> jnp.ndarray:
         # Task-specific representation layer
         task_rep = self.task_rep(common_input)
-        task_rep = nn.relu(task_rep)
 
         # Concatenate with the shared representation
         combined_rep = jnp.concatenate([shared_rep, task_rep], axis=-1)
@@ -44,7 +50,6 @@ class TaskNet(nn.Module):
     def get_activations(self, common_input: jnp.ndarray, shared_rep: jnp.ndarray) -> dict[str, jnp.ndarray]:
         """Returns intermediate activations."""
         task_rep = self.task_rep(common_input)
-        task_rep = nn.relu(task_rep)
 
         combined_rep = jnp.concatenate([shared_rep, task_rep], axis=-1)
 
@@ -58,6 +63,7 @@ class TaskNet(nn.Module):
 class MTQNetWithTaskReps(nn.Module):
     action_dim: int
     n_tasks: int
+    linear_task_rep: bool
     n_features_per_task: int
     n_shared_expand: int
     n_shared_bottleneck: int
@@ -99,7 +105,7 @@ class MTQNetWithTaskReps(nn.Module):
             out_axes=0,
             axis_size=self.n_tasks,
             methods=['__call__', 'get_activations']
-        )(self.action_dim, self.n_features_per_task, name="TaskNets")
+        )(self.action_dim, self.n_features_per_task, self.linear_task_rep, name="TaskNets")
 
     def __call__(self, x: jnp.ndarray, task: jnp.ndarray):
         # Apply the convolutional backbone
@@ -306,6 +312,7 @@ def make_network(config, action_dim, n_tasks):
         return MTQNetWithTaskReps(
             action_dim=action_dim,
             n_tasks=n_tasks,
+            linear_task_rep=config["LINEAR_TASK_REP"],
             n_features_per_task=config["N_FEATURES_PER_TASK"],
             n_shared_expand=config["N_SHARED_EXPAND"],
             n_shared_bottleneck=config["N_SHARED_BOTTLENECK"],
@@ -874,24 +881,25 @@ def main():
         "NUM_ENVS": 1, # Must be set to 1, handling of truncation fails otherwise (entire batch is currently ignored if any transitions result in truncation)
         "BUFFER_SIZE": 10000,
         "BUFFER_BATCH_SIZE": 32,
-        "TOTAL_TIMESTEPS": 150000, # 15e4, #5e5,
-        "EPSILON_START": 1, # EPSILON_START==EPSILON_FINISH -> no annealing
-        "EPSILON_FINISH": 0.05,
-        "EPSILON_ANNEAL_TIME": 75000,
+        "TOTAL_TIMESTEPS": 100000, # 15e4, #5e5,
+        "EPSILON_START": 0.1, # EPSILON_START==EPSILON_FINISH -> no annealing
+        "EPSILON_FINISH": 0.1,
+        "EPSILON_ANNEAL_TIME": 1, # 1e5, # 2e5,
         "TARGET_UPDATE_INTERVAL": 64,
         "LR": 2.5e-4,
         "LEARNING_STARTS": 1000,
         "TRAINING_INTERVAL": 1,
         "N_FEATURES_PER_TASK": 2,
+        "LINEAR_TASK_REP": False,  # If True, use linear task representation, otherwise has activation applied to task representation
         "N_SHARED_EXPAND": 64,
         "N_SHARED_BOTTLENECK": 8,
         "N_FEATURES_CONV1": 32,
         "N_FEATURES_CONV2": 16,
         "LR_LINEAR_DECAY": False,
-        "GAMMA": 0.8,
+        "GAMMA": 0.9,
         "TAU": 1.0,
-        "ENV_NAME": "TwoRoomsMultiTask5",
-        "NETWORK_NAME": "MTQNet",  # Options: MTQNet, MTQNetWithBottleneck, MTQNetWithTaskReps
+        "ENV_NAME": "TwoRoomsMultiTaskEasy5",
+        "NETWORK_NAME": "MTQNetWithBottleneck",  # Options: MTQNet, MTQNetWithBottleneck, MTQNetWithTaskReps
         "SEED": [0],
         "NUM_SEEDS": 1, # Leave as 1 otherwise wandb logging will not work properly
         "WANDB_MODE": "online",  # set to online to activate wandb

@@ -1,0 +1,69 @@
+{
+  "config": {
+    "NUM_ENVS": 1,
+    "BUFFER_SIZE": 10000,
+    "BUFFER_BATCH_SIZE": 32,
+    "TOTAL_TIMESTEPS": 150000,
+    "EPSILON_START": 1,
+    "EPSILON_FINISH": 0.05,
+    "EPSILON_ANNEAL_TIME": 75000,
+    "TARGET_UPDATE_INTERVAL": 64,
+    "LR": 0.00025,
+    "LEARNING_STARTS": 1000,
+    "TRAINING_INTERVAL": 1,
+    "N_FEATURES_PER_TASK": 2,
+    "LINEAR_TASK_REP": true,
+    "N_SHARED_EXPAND": 64,
+    "N_SHARED_BOTTLENECK": 12,
+    "N_FEATURES_CONV1": 32,
+    "N_FEATURES_CONV2": 16,
+    "LR_LINEAR_DECAY": false,
+    "GAMMA": 0.9,
+    "TAU": 1.0,
+    "ENV_NAME": "TwoRoomsMultiTask5",
+    "NETWORK_NAME": "MTQNet",
+    "SEED": 0,
+    "NUM_SEEDS": 1,
+    "WANDB_MODE": "online",
+    "ENTITY": "odiamond-personal",
+    "PROJECT": "feature-attainment-purejaxrl",
+    "PRINT_METRICS": true,
+    "CURRENT_TIME": "25-07-30-10-09-17",
+    "NUM_UPDATES": 150000
+  },
+  "grid_size": 5,
+  "num_hallways": 3,
+  "num_goals": 3,
+  "hallway_locs": [
+    [
+      0,
+      2
+    ],
+    [
+      2,
+      2
+    ],
+    [
+      4,
+      2
+    ]
+  ],
+  "goal_locs": [
+    [
+      0,
+      4
+    ],
+    [
+      2,
+      4
+    ],
+    [
+      4,
+      4
+    ]
+  ],
+  "start_loc": [
+    0,
+    0
+  ]
+}

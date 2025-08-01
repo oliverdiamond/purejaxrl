@@ -3,7 +3,7 @@
     "NUM_ENVS": 1,
     "BUFFER_SIZE": 10000,
     "BUFFER_BATCH_SIZE": 32,
-    "TOTAL_TIMESTEPS": 3000,
+    "TOTAL_TIMESTEPS": 1000000.0,
     "EPSILON_START": 0.1,
     "EPSILON_FINISH": 0.1,
     "EPSILON_ANNEAL_TIME": 1,
@@ -26,18 +26,26 @@
     "PROJECT": "feature-attainment-purejaxrl",
     "PRINT_METRICS": true,
     "SAVE_ACTIVATIONS": true,
-    "ENV_NAME": "TwoRoomsMTFixedHallway5",
+    "ENV_NAME": "TwoRoomsMTHallwayAsTask5",
     "NETWORK_NAME": "MTQNetWithBottleneck",
     "SEED": 0,
-    "CURRENT_TIME": "25-07-31-13-18-48",
-    "NUM_UPDATES": 3000
+    "CURRENT_TIME": "25-07-31-15-09-48",
+    "NUM_UPDATES": 1000000.0
   },
   "grid_size": 5,
-  "num_hallways": 1,
-  "num_goals": 3,
+  "num_hallways": 3,
+  "num_goals": 1,
   "hallway_locs": [
     [
       0,
+      2
+    ],
+    [
+      2,
+      2
+    ],
+    [
+      4,
       2
     ]
   ],
@@ -45,18 +53,10 @@
     [
       0,
       4
-    ],
-    [
-      2,
-      4
-    ],
-    [
-      4,
-      4
     ]
   ],
   "start_loc": [
-    0,
+    2,
     0
   ]
 }

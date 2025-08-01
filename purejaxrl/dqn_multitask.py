@@ -539,7 +539,7 @@ def make_train(config):
             
             if config['PRINT_METRICS'] == True:
                 def print_callback(metrics):
-                    if metrics["timesteps"] % 500 == 0:
+                    if metrics["timesteps"] % 2000 == 0:
                         jax.debug.print(
                             "timesteps: {timesteps}, updates: {updates}, loss: {loss:.4f}, undiscounted_returns: {undiscounted_returns:.4f}, discounted_returns: {discounted_returns:.4f} task: {task}",
                             timesteps=metrics["timesteps"],

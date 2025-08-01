@@ -324,7 +324,7 @@ class TwoRoomsMTFixedHallway5(TwoRoomsMT):
             n_tasks=3,
             max_steps_in_episode=500,
             start_locs=jnp.array([[0, 0], [2, 0], [4, 0]]),
-            hallway_locs=jnp.array([[0, 2]]),
+            hallway_locs=jnp.array([[2, 2]]),
             goal_locs=jnp.array([[0, 4], [2, 4], [4, 4]])
         )
 

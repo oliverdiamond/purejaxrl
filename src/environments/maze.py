@@ -1,9 +1,4 @@
-"""JAX implementation of Four Rooms environment (Sutton et al., 1999).
-
-
-Source: Comparable to https://github.com/howardh/gym-fourrooms Since gymnax
-automatically resets env at done, we abstract different resets
-"""
+# Modified from: https://github.com/erfanMhi/LTA-Representation-Properties/blob/main/core/environment/gridworlds_goal.py
 
 from typing import Any
 import dataclasses
@@ -18,32 +13,75 @@ from gymnax.environments import environment, spaces
 @struct.dataclass
 class EnvState(environment.EnvState):
     time: int
-    hallway_loc: jax.Array
     agent_loc: jax.Array
 
 @struct.dataclass
 class EnvParams(environment.EnvParams):
-    goal_loc: jax.Array = dataclasses.field(default_factory=lambda: jnp.array([0, 8]))
-    start_loc: jax.Array = dataclasses.field(default_factory=lambda: jnp.array([0, 0]))
-    hallway_locs: jax.Array = dataclasses.field(default_factory=lambda: jnp.array([[4, 4]])) # jnp.array([[0, 2], [2, 2], [4, 2]]))
+    #goal_loc: jax.Array = dataclasses.field(default_factory=lambda: jnp.array([0, 8]))
     max_steps_in_episode: int = 500
-    # N: int = 5
-    
 
-class TwoRooms(environment.Environment[EnvState, EnvParams]):
+class Maze(environment.Environment[EnvState, EnvParams]):
     def __init__(
         self,
     ):
         super().__init__()
         self.directions = jnp.array([[-1, 0], [0, 1], [1, 0], [0, -1]])
         self.directions_str = ["up", "right", "down", "left"]
-        self.N = 9
+        self.N = 15
+        self.goal_loc = jnp.array([9, 9])
+        self._obstacles_map = self._get_obstacles_map()
+        self._start_locs = self._get_start_locs()
+        self._rgb_template = self._get_rgb_template()
 
     @property
     def default_params(self) -> EnvParams:
         # Default environment parameters
         return EnvParams()
 
+    def _get_obstacles_map(self):
+        _map = jnp.zeros([self.N, self.N])
+        _map = _map.at[2, 0:6].set(1.0)
+        _map = _map.at[2, 8:].set(1.0)
+        _map = _map.at[3, 5].set(1.0)
+        _map = _map.at[4, 5].set(1.0)
+        _map = _map.at[5, 2:7].set(1.0)
+        _map = _map.at[5, 9:].set(1.0)
+        _map = _map.at[8, 2].set(1.0)
+        _map = _map.at[8, 5].set(1.0)
+        _map = _map.at[8, 8:].set(1.0)
+        _map = _map.at[9, 2].set(1.0)
+        _map = _map.at[9, 5].set(1.0)
+        _map = _map.at[9, 8].set(1.0)
+        _map = _map.at[10, 2].set(1.0)
+        _map = _map.at[10, 5].set(1.0)
+        _map = _map.at[10, 8].set(1.0)
+        _map = _map.at[11, 2:6].set(1.0)
+        _map = _map.at[11, 8:12].set(1.0)
+        _map = _map.at[12, 5].set(1.0)
+        _map = _map.at[13, 5].set(1.0)
+        _map = _map.at[14, 5].set(1.0)
+        
+        return _map
+
+    def _get_start_locs(self):
+        # Get all valid starting locations (not an obstacle and not the goal)
+        valid_locs_mask = self._obstacles_map == 0.0
+        valid_locs_mask = valid_locs_mask.at[self.goal_loc[0], self.goal_loc[1]].set(False)
+        valid_locs = jnp.argwhere(valid_locs_mask)
+        return valid_locs
+
+    def _get_rgb_template(self):
+        # Create a (N, N, 1) boolean mask for obstacles
+        obstacle_mask = jnp.expand_dims(self._obstacles_map, axis=-1)
+
+        # Create templates for wall and empty space colors
+        wall_color = jnp.array([1.0, 0.0, 0.0])
+        empty_color = jnp.array([0.0, 1.0, 0.0])
+
+        # Use jnp.where to select colors based on the obstacle mask
+        rgb_template = jnp.where(obstacle_mask, wall_color, empty_color)
+        return rgb_template
+        
     def step_env(
         self,
         key: jax.Array,
@@ -56,22 +94,18 @@ class TwoRooms(environment.Environment[EnvState, EnvParams]):
         agent_loc_new = jnp.clip(
             state.agent_loc + self.directions[action], 0, self.N - 1
         )
-        on_obstacle = jnp.logical_and(
-            agent_loc_new[1] == state.hallway_loc[1],
-            agent_loc_new[0] != state.hallway_loc[0]
-        )
+        on_obstacle = self._obstacles_map[agent_loc_new[0], agent_loc_new[1]] == 1.0
         agent_loc_new = jax.lax.select(
             on_obstacle, state.agent_loc, agent_loc_new
         )
 
         state = EnvState(
             time=state.time + 1,
-            hallway_loc=state.hallway_loc,
             agent_loc=agent_loc_new,
         )
 
         reward = jnp.asarray(
-            jnp.array_equal(state.agent_loc, params.goal_loc),
+            jnp.array_equal(state.agent_loc, self.goal_loc),
             dtype=jnp.float32,
         )
 
@@ -89,18 +123,16 @@ class TwoRooms(environment.Environment[EnvState, EnvParams]):
     def reset_env(
         self, key: jax.Array, params: EnvParams
     ) -> tuple[jax.Array, EnvState]:
-        """Reset environment state by sampling hallway and start loc."""
-        # Reset both the agents position (deterministic) and the hallway location (random)
-        hallway_idx = jax.random.randint(
-            key, (), 0, params.hallway_locs.shape[0]
-        )
-        hallway_loc = params.hallway_locs[hallway_idx]
+        """Reset environment state by sampling start loc."""
+        
+        # Sample a random starting location
+        random_idx = jax.random.randint(key, (), 0, self._start_locs.shape[0])
+        start_loc = self._start_locs[random_idx]
 
         state = EnvState(
             time=0,
-            hallway_loc=hallway_loc,
-            agent_loc=params.start_loc,
-    )
+            agent_loc=start_loc,
+        )
 
         return self.get_obs(state, params), state
 
@@ -109,7 +141,7 @@ class TwoRooms(environment.Environment[EnvState, EnvParams]):
         # Check number of steps in episode termination condition
         done_steps = self.is_truncated(state, params)
         # Check if agent has found the goal
-        done_goal = jnp.array_equal(state.agent_loc, params.goal_loc)
+        done_goal = jnp.array_equal(state.agent_loc, self.goal_loc)
         
         done = jnp.logical_or(done_goal, done_steps)
         return done
@@ -129,32 +161,16 @@ class TwoRooms(environment.Environment[EnvState, EnvParams]):
     ) -> jax.Array:
         """Return observation from raw state info."""
         # N x N image with 3 Channels: [Wall, Empty, Agent]
-        obs = jnp.zeros((self.N, self.N, 3), dtype=jnp.float32)
-        obs = obs.at[:, :, 1].set(1) # Set all cells to empty
-        
-        wall_y = state.hallway_loc[1] # y-coordinate of the hallway
-        
-        # Set all non-hallway cells in the dividing column to walls
-        wall_mask = jnp.arange(self.N) != state.hallway_loc[0]
-
-        # Update empty channel (set to 0 where there are walls)
-        obs = obs.at[:, wall_y, 1].set(
-            jnp.where(wall_mask, 0, obs[:, wall_y, 1])
-        )
-        # Update wall channel (set to 1 where there are walls)
-        obs = obs.at[:, wall_y, 0].set(
-            jnp.where(wall_mask, 1, obs[:, wall_y, 0])
-        )
-        
+        obs = self._rgb_template
         # Set agent location
-        obs = obs.at[state.agent_loc[0], state.agent_loc[1], 1].set(0)
-        obs = obs.at[state.agent_loc[0], state.agent_loc[1], 2].set(1)
+        obs = obs.at[state.agent_loc[0], state.agent_loc[1]].set(jnp.array([0.0, 0.0, 1.0]))
+
         return obs
 
     @property
     def name(self) -> str:
         """Environment name."""
-        return "TwoRooms"
+        return "Maze"
 
     @property
     def num_actions(self) -> int:
@@ -174,12 +190,6 @@ class TwoRooms(environment.Environment[EnvState, EnvParams]):
         """State space of the environment."""
         return spaces.Dict(
             {
-                "hallway_loc": spaces.Box(
-                    0,
-                    self.N,
-                    (2,),
-                    jnp.float32,
-                ),
                 "agent_loc": spaces.Box(
                     0,
                     self.N,
@@ -189,48 +199,3 @@ class TwoRooms(environment.Environment[EnvState, EnvParams]):
                 "time": spaces.Discrete(params.max_steps_in_episode),
             }
         )
-
-class TwoRooms5(TwoRooms):
-    """Two Rooms environment with 5x5 grid."""
-    
-    def __init__(self):
-        super().__init__()
-        self.N = 5
-
-    @property
-    def default_params(self) -> EnvParams:
-        # Default environment parameters
-        return EnvParams(
-            max_steps_in_episode=500,
-            goal_loc=jnp.array([0, 4]),
-            start_loc=jnp.array([0, 0]),
-            hallway_locs=jnp.array([[2, 2]]),
-        )
-
-    @property
-    def name(self) -> str:
-        """Environment name."""
-        return "TwoRooms5"
-
-
-class TwoRooms15(TwoRooms):
-    """Two Rooms environment with 5x5 grid."""
-    
-    def __init__(self):
-        super().__init__()
-        self.N = 15
-
-    @property
-    def default_params(self) -> EnvParams:
-        # Default environment parameters
-        return EnvParams(
-            max_steps_in_episode=500,
-            goal_loc=jnp.array([0, 14]),
-            start_loc=jnp.array([0, 0]),
-            hallway_locs=jnp.array([[7, 7]])
-            )
-
-    @property
-    def name(self) -> str:
-        """Environment name."""
-        return "TwoRooms15"

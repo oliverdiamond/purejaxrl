@@ -1,8 +1,11 @@
 from .rooms import TwoRooms, TwoRooms15, TwoRooms5
+from .maze import Maze
 from .rooms_multitask import TwoRoomsMT, TwoRoomsMT5, TwoRoomsMT15, TwoRoomsMTFixedHallway5, TwoRoomsMTFixedStart5, TwoRoomsMTHallwayAsTask, TwoRoomsMTHallwayAsTask5, TwoRoomsMTHallwayAsTask15, TwoRoomsMTHallwayAsTaskRandomStart5
 
 def make(env_id: str, **env_kwargs):
-    if env_id == "TwoRooms":
+    if env_id == "Maze":
+        return Maze(**env_kwargs)
+    elif env_id == "TwoRooms":
         env = TwoRooms(**env_kwargs)
     elif env_id == "TwoRooms5":
         env = TwoRooms5(**env_kwargs)

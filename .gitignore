@@ -3,3 +3,13 @@ __pycache__/
 .venv/
 .vscode/
 wandb/
+
+# Results
+results/
+
+# VSCode settings
+.vscode/
+
+# Plots
+plots/
+analysis/plots/

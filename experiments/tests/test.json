@@ -1,0 +1,12 @@
+{
+    "agent": "dqn",
+    "save_weights": true,
+    "wandb_mode": "disabled",
+    "metaParameters": {
+        "total_timesteps": 10000,
+        "seed": 0,
+        "n_seeds": 1,
+        "env_name": "Maze",
+        "activation": "fta"
+    }
+}

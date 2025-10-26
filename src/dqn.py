@@ -17,17 +17,17 @@ import optax
 import flax.linen as nn
 from flax.training.train_state import TrainState
 from flax.linen.initializers import variance_scaling
-from wrappers import LogWrapper, FlattenObservationWrapper
+from src.util.wrappers import LogWrapper, FlattenObservationWrapper
 import gymnax
 import flashbax as fbx
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 import numpy as np
 
-from environments.rooms import TwoRooms
-from environments.rooms import EnvState as TwoRoomsEnvState
+from environments.maze import Maze
+from environments.maze import EnvState as MazeEnvState
 from environments import make
-from util import get_time_str
+from util import get_time_str, WANDB_ENTITY, WANDB_PROJECT
 from util.fta import fta
 from experiment import experiment_model
 
@@ -38,6 +38,7 @@ class QNet(nn.Module):
     conv1_dim: int = 32
     conv2_dim: int = 16
     rep_dim: int = 64
+    head_hidden_dim: int = 64
 
     def setup(self):
         w_conv_init = variance_scaling(scale=math.sqrt(5), mode='fan_avg', distribution='uniform')
@@ -64,9 +65,18 @@ class QNet(nn.Module):
             nn.relu
         ], name="rep")
 
-        self.head = nn.Dense(self.action_dim, kernel_init=w_init, name="head")
+        self.head = nn.Sequential(
+            [
+            nn.Dense(self.head_hidden_dim, kernel_init=w_init, name="head_hidden1"),
+            nn.relu,
+            nn.Dense(self.head_hidden_dim, kernel_init=w_init, name="head_hidden2"),
+            nn.relu,
+            nn.Dense(self.action_dim, kernel_init=w_init, name="head_output")
+            ], 
+            name="head",
+        )
 
-    def __call__(self, x: jnp.ndarray, task: jnp.ndarray):
+    def __call__(self, x: jnp.ndarray):
         # conv backbone
         x = self.conv_backbone(x)
         x = x.reshape((x.shape[0], -1))  # Flatten the output
@@ -97,6 +107,7 @@ class QNetFTA(nn.Module):
     conv1_dim: int = 32
     conv2_dim: int = 16
     rep_dim: int = 64
+    head_hidden_dim: int = 64
     fta_eta: float = 2.0
     fta_tiles: int = 20
     fta_lower_bound: float = -20.0
@@ -128,9 +139,18 @@ class QNetFTA(nn.Module):
             fta_activation
         ], name="rep")
 
-        self.head = nn.Dense(self.action_dim, kernel_init=w_init, name="head")
+        self.head = nn.Sequential(
+            [
+            nn.Dense(self.head_hidden_dim, kernel_init=w_init, name="head_hidden1"),
+            nn.relu,
+            nn.Dense(self.head_hidden_dim, kernel_init=w_init, name="head_hidden2"),
+            nn.relu,
+            nn.Dense(self.action_dim, kernel_init=w_init, name="head_output")
+            ], 
+            name="head",
+        )
 
-    def __call__(self, x: jnp.ndarray, task: jnp.ndarray):
+    def __call__(self, x: jnp.ndarray):
         # conv backbone
         x = self.conv_backbone(x)
         x = x.reshape((x.shape[0], -1))  # Flatten the output
@@ -198,7 +218,7 @@ def make_train(config):
     # basic_env, env_params = gymnax.make(config["ENV_NAME"])
     # env = FlattenObservationWrapper(basic_env)
     # env = LogWrapper(env) # type: ignore
-    base_env, env_params = make(config["ENV_NAME"])
+    base_env, env_params = make(config["ENV_NAME"]) # type: ignore
     env = LogWrapper(base_env) # type: ignore
 
     vmap_reset = lambda n_envs: lambda rng: jax.vmap(env.reset, in_axes=(0, None))(
@@ -302,8 +322,11 @@ def make_train(config):
 
             # BUFFER UPDATE
             timestep = TimeStep(obs=last_obs, next_obs=obs, action=action, reward=reward, done=done) # type: ignore
-            timestep = jax.tree_util.tree_map(lambda x: x[~info['truncated']], timestep)
-            buffer_state = buffer.add(buffer_state, timestep)
+            buffer_state = jax.lax.cond(
+                info['truncated'].any(),  # if any envs are truncated, do not add to buffer. Note this breaks parallel envs!
+                lambda: buffer_state,
+                lambda: buffer.add(buffer_state, timestep),
+            )
 
             # NETWORKS UPDATE
             def _learn_phase(train_state, rng):
@@ -413,192 +436,133 @@ def make_train(config):
     return train
 
 
-# def plot_qvals(network_params, rng):
-#     """Performs a forward pass with final params and visualizes Q-values for all hallway locations."""
-#     basic_env = TwoRooms()
-#     env_params = basic_env.default_params
-#     network = QNet(action_dim=basic_env.action_space(env_params).n)
-#     rng, _rng = jax.random.split(rng)
-#     init_x = jnp.zeros((1,) + basic_env.observation_space(env_params).shape) # Conv layers need extra dimension for batch size
-#     _ = network.init(_rng, init_x)
-#     # Get grid dimensions
-#     N = basic_env.N
-#     num_hallways = env_params.hallway_locs.shape[0]
+def plot_qvals(network_params, config, save_dir):
+    """Performs a forward pass with final params and visualizes Q-values for all locations in the maze."""
+    basic_env = Maze()
+    env_params = basic_env.default_params
+    network = make_network(config, action_dim=basic_env.action_space(env_params).n)
     
+    # Get grid dimensions
+    N = basic_env.N
     
-#     # Store Q-values for all (hallway, agent_location) pairs
-#     all_q_values = {}
+    # Store Q-values for all agent_location pairs
+    q_values_grid = jnp.zeros((N, N, 4))  # 4 actions: up, right, down, left
     
-#     # Outer loop: iterate over all hallway locations
-#     for hallway_idx in range(num_hallways):
-#         hallway_loc = env_params.hallway_locs[hallway_idx]
-#         q_values_grid = jnp.zeros((N, N, 4))  # 4 actions: up, right, down, left
-        
-#         # Inner loop: iterate over each location in the grid
-#         for row in range(N):
-#             for col in range(N):
-#                 agent_loc = jnp.array([row, col])
+    # Iterate over each location in the grid
+    for row in range(N):
+        for col in range(N):
+            agent_loc = jnp.array([row, col])
+            
+            # Check if this is a valid location for the agent (not an obstacle)
+            is_obstacle = basic_env._obstacles_map[row, col] == 1.0
+            is_goal = jnp.array_equal(agent_loc, basic_env.goal_loc)
+            
+            if not is_obstacle and not is_goal:
+                # Create new state with current agent location
+                current_state = MazeEnvState(
+                    time=0,
+                    agent_loc=agent_loc
+                )
                 
-#                 # Check if this is a valid location for the agent
-#                 # 1. Not a wall location
-#                 # 2. Not the goal location
-#                 is_wall = (col == hallway_loc[1] and row != hallway_loc[0])
-#                 is_goal = jnp.array_equal(agent_loc, env_params.goal_loc)
+                # Generate observation for this state
+                obs = basic_env.get_obs(current_state, params=env_params)
+                obs_batch = jnp.expand_dims(obs, 0) # Add batch dimension
                 
-#                 if not is_wall and not is_goal:
-#                     # Create new state with current agent location
-#                     current_state = TwoRoomsEnvState(
-#                         time=0,
-#                         hallway_loc=hallway_loc,
-#                         agent_loc=agent_loc
-#                     )
+                # Forward pass through network
+                q_vals = network.apply(network_params, obs_batch)
+                q_values_grid = q_values_grid.at[row, col].set(q_vals[0])
+    
+    # Create visualization
+    base_fig_size = max(8, N * 0.8)
+    fig_size = min(base_fig_size, 25)
+    q_value_fontsize = max(4, min(10, 80 / N))
+    label_fontsize = max(8, min(24, 120 / N))
+    edge_linewidth = max(0.3, min(1.0, 8 / N))
+    
+    fig, ax = plt.subplots(1, 1, figsize=(fig_size, fig_size))
+    
+    # Normalize Q-values for color mapping
+    valid_q_values = []
+    for row in range(N):
+        for col in range(N):
+            is_obstacle = basic_env._obstacles_map[row, col] == 1.0
+            is_goal = jnp.array_equal(jnp.array([row, col]), basic_env.goal_loc)
+            if not is_obstacle and not is_goal:
+                valid_q_values.extend(q_values_grid[row, col])
+    
+    if valid_q_values:
+        q_min, q_max = min(valid_q_values), max(valid_q_values)
+        q_range = q_max - q_min if q_max > q_min else 1.0
+    else:
+        q_min, q_max, q_range = 0, 1, 1
+
+    # Draw the grid
+    for row in range(N):
+        for col in range(N):
+            agent_loc = jnp.array([row, col])
+            is_obstacle = basic_env._obstacles_map[row, col] == 1.0
+            is_goal = jnp.array_equal(agent_loc, basic_env.goal_loc)
+            
+            plot_row = N - 1 - row
+            
+            if is_obstacle:
+                rect = patches.Rectangle((col, plot_row), 1, 1, linewidth=edge_linewidth, edgecolor='black', facecolor='black')
+                ax.add_patch(rect)
+            elif is_goal:
+                rect = patches.Rectangle((col, plot_row), 1, 1, linewidth=edge_linewidth, edgecolor='black', facecolor='green')
+                ax.add_patch(rect)
+                ax.text(col + 0.5, plot_row + 0.5, 'G', ha='center', va='center', fontsize=label_fontsize, color='white', weight='bold')
+            else:
+                q_vals = q_values_grid[row, col]
+                
+                triangles = [
+                    [(col, plot_row + 1), (col + 1, plot_row + 1), (col + 0.5, plot_row + 0.5)],  # up
+                    [(col + 1, plot_row + 1), (col + 1, plot_row), (col + 0.5, plot_row + 0.5)],    # right
+                    [(col + 1, plot_row), (col, plot_row), (col + 0.5, plot_row + 0.5)],      # down
+                    [(col, plot_row), (col, plot_row + 1), (col + 0.5, plot_row + 0.5)]       # left
+                ]
+                
+                for q_val, triangle_verts in zip(q_vals, triangles):
+                    intensity = (q_val - q_min) / q_range if q_range > 0 else 0.5
+                    color_intensity = float(max(0.1, min(1.0, intensity)))
                     
-#                     # Generate observation for this state
-#                     obs = basic_env.get_obs(current_state, params=env_params)
-#                     obs_batch = jnp.expand_dims(obs, 0) # Add batch dimension
+                    triangle = patches.Polygon(triangle_verts, closed=True, facecolor=(0, 0, color_intensity, 0.8), edgecolor='black', linewidth=edge_linewidth * 0.5)
+                    ax.add_patch(triangle)
                     
-#                     # Forward pass through network
-#                     q_vals = network.apply(network_params, obs_batch)
-#                     q_values_grid = q_values_grid.at[row, col].set(q_vals[0])
-        
-#         all_q_values[hallway_idx] = q_values_grid
-    
-#     # Create visualization with dynamic sizing
-#     # Scale figure size and font sizes based on grid size
-#     base_fig_size = max(8, N * 0.5)  # Minimum 8, grows with grid size
-#     fig_size = min(base_fig_size, 20)  # Cap at 20 to avoid huge figures
-    
-#     # Dynamic font sizes based on grid size
-#     q_value_fontsize = max(4, min(12, 60 / N))  # Scale inversely with grid size
-#     label_fontsize = max(8, min(24, 120 / N))   # For S and G labels
-#     edge_linewidth = max(0.3, min(1.0, 8 / N)) # Thinner lines for larger grids
-    
-#     fig, axes = plt.subplots(1, num_hallways, figsize=(fig_size * num_hallways, fig_size))
-#     if num_hallways == 1:
-#         axes = [axes]
-    
-#     for hallway_idx in range(num_hallways):
-#         ax = axes[hallway_idx]
-#         hallway_loc = env_params.hallway_locs[hallway_idx]
-#         q_values_grid = all_q_values[hallway_idx]
-        
-#         # Normalize Q-values for color mapping
-#         valid_q_values = []
-#         for row in range(N):
-#             for col in range(N):
-#                 agent_loc = jnp.array([row, col])
-#                 is_wall = (col == hallway_loc[1] and row != hallway_loc[0])
-#                 is_goal = jnp.array_equal(agent_loc, env_params.goal_loc)
-#                 if not is_wall and not is_goal:
-#                     valid_q_values.extend(q_values_grid[row, col])
-        
-#         if valid_q_values:
-#             q_min, q_max = min(valid_q_values), max(valid_q_values)
-#             q_range = q_max - q_min if q_max > q_min else 1.0
-#         else:
-#             q_min, q_max, q_range = 0, 1, 1
-        
-#         # Draw the grid
-#         for row in range(N):
-#             for col in range(N):
-#                 agent_loc = jnp.array([row, col])
-#                 is_wall = (col == hallway_loc[1] and row != hallway_loc[0])
-#                 is_goal = jnp.array_equal(agent_loc, env_params.goal_loc)
-                
-#                 # Flip row for plotting (matplotlib uses bottom-left origin)
-#                 plot_row = N - 1 - row
-                
-#                 if is_wall:
-#                     # Draw wall as black square
-#                     rect = patches.Rectangle((col, plot_row), 1, 1, 
-#                                             linewidth=edge_linewidth, edgecolor='black', facecolor='black')
-#                     ax.add_patch(rect)
-#                 elif is_goal:
-#                     # Draw goal as green square
-#                     rect = patches.Rectangle((col, plot_row), 1, 1, 
-#                                             linewidth=edge_linewidth, edgecolor='black', facecolor='green')
-#                     ax.add_patch(rect)
-#                     ax.text(col+0.5, plot_row+0.5, f'G', 
-#                                                     ha='center', va='center', fontsize=label_fontsize, 
-#                                                     color='white', weight='bold')
-#                 else:
-#                     # Valid agent location - draw Q-value triangles
-#                     q_vals = q_values_grid[row, col]
+                    triangle_center_x = sum(v[0] for v in triangle_verts) / 3
+                    triangle_center_y = sum(v[1] for v in triangle_verts) / 3
                     
-#                     # Define triangle vertices for each action
-#                     # up, right, down, left
-#                     triangles = [
-#                         [(col, plot_row + 1), (col + 1, plot_row + 1), (col + 0.5, plot_row + 0.5)],  # up
-#                         [(col + 1, plot_row + 1), (col + 1, plot_row), (col + 0.5, plot_row + 0.5)],    # right
-#                         [(col + 1, plot_row), (col, plot_row), (col + 0.5, plot_row + 0.5)],      # down
-#                         [(col, plot_row), (col, plot_row + 1), (col + 0.5, plot_row + 0.5)]       # left
-#                     ]
-                    
-#                     for action_idx, (q_val, triangle_verts) in enumerate(zip(q_vals, triangles)):
-#                         # Normalize Q-value for color intensity
-#                         intensity = (q_val - q_min) / q_range if q_range > 0 else 0.5
-#                         color_intensity = float(max(0.1, min(1.0, intensity)))  # Clamp between 0.1 and 1.0
-                        
-#                         triangle = patches.Polygon(triangle_verts, closed=True,
-#                                                     facecolor=(0, 0, color_intensity, 0.8),
-#                                                     edgecolor='black', linewidth=edge_linewidth * 0.5)
-#                         ax.add_patch(triangle)
-                        
-#                         # Add Q-value text in triangle center, but shift slightly towards square center
-#                         triangle_center_x = sum(v[0] for v in triangle_verts) / 3
-#                         triangle_center_y = sum(v[1] for v in triangle_verts) / 3
-#                         square_center_x = col + 0.5
-#                         square_center_y = plot_row + 0.5
-                        
-#                         # Move the text 30% of the way from triangle center to square center
-#                         shift_factor = 0.15
-#                         center_x = triangle_center_x + shift_factor * (square_center_x - triangle_center_x)
-#                         center_y = triangle_center_y + shift_factor * (square_center_y - triangle_center_y)
-                        
-#                         # Format Q-value text based on magnitude for better readability
-#                         if abs(q_val) >= 100:
-#                             q_text = f'{float(q_val):.0f}'
-#                         elif abs(q_val) >= 10:
-#                             q_text = f'{float(q_val):.1f}'
-#                         else:
-#                             q_text = f'{float(q_val):.2f}'
-                            
-#                         ax.text(center_x, center_y, q_text, 
-#                                 ha='center', va='center', fontsize=q_value_fontsize, 
-#                                 color='white', weight='bold')
-                
-#                 if jnp.array_equal(agent_loc, env_params.start_loc):
-#                     # Draw S at start location
-#                     ax.text(col + 0.5, plot_row + 0.5, 'S', 
-#                             ha='center', va='center', fontsize=label_fontsize, 
-#                             color='white', weight='bold')
-#                 # Draw grid lines
-#                 rect = patches.Rectangle((col, plot_row), 1, 1, 
-#                                         linewidth=edge_linewidth, edgecolor='black', facecolor='none')
-#                 ax.add_patch(rect)
-        
-#         ax.set_xlim(0, N)
-#         ax.set_ylim(0, N)
-#         ax.set_aspect('equal')
-#         ax.set_xticks([])
-#         ax.set_yticks([])
-#         ax.set_xticklabels([])
-#         ax.set_yticklabels([])
-#         title_fontsize = max(10, min(16, 100 / N))  # Dynamic title font size
-#         ax.set_title(f'Action Values with Hallway at ({hallway_loc[0]}, {hallway_loc[1]})', 
-#                      fontsize=title_fontsize)
-        
-#         # # Adjust tick spacing for larger grids to avoid clutter
-#         # tick_spacing = max(1, N // 10)  # Show fewer ticks for large grids
-#         # ax.set_xticks(range(0, N + 1, tick_spacing))
-#         # ax.set_yticks(range(0, N + 1, tick_spacing))
-#         ax.grid(True, alpha=0.3, linewidth=edge_linewidth * 0.5)
+                    q_text = f'{float(q_val):.2f}'
+                    ax.text(triangle_center_x, triangle_center_y, q_text, ha='center', va='center', fontsize=q_value_fontsize, color='white', weight='bold')
+            
+            is_start_loc = any(jnp.array_equal(agent_loc, sl) for sl in basic_env._start_locs)
+            if is_start_loc:
+                ax.text(col + 0.5, plot_row + 0.5, 'S', ha='center', va='center', fontsize=label_fontsize, color='yellow', weight='bold')
+
+            rect = patches.Rectangle((col, plot_row), 1, 1, linewidth=edge_linewidth, edgecolor='black', facecolor='none')
+            ax.add_patch(rect)
     
-#     plt.tight_layout()
-#     plt.savefig(f'purejaxrl/plots/dqn_q_values_N={N}.png', dpi=300, bbox_inches='tight')
+    ax.set_xlim(0, N)
+    ax.set_ylim(0, N)
+    ax.set_aspect('equal')
+    ax.set_xticks([])
+    ax.set_yticks([])
+    ax.set_xticklabels([])
+    ax.set_yticklabels([])
+    title_fontsize = max(10, min(16, 100 / N))
+    ax.set_title(f'Action Values for {config["ENV_NAME"]}', fontsize=title_fontsize)
+    ax.grid(True, alpha=0.3, linewidth=edge_linewidth * 0.5)
     
-#     print(f"Q-values visualization saved as 'q_values_N={N}.png'")
-#     print(f"Analyzed {num_hallways} hallway configuration(s) for {N}x{N} grid")
+    plt.tight_layout()
+    os.makedirs(save_dir, exist_ok=True)
+    save_path = os.path.join(save_dir, f'q_vals_{config["ENV_NAME"]}.png')
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+
+    # Log figure to wandb if enabled
+    if wandb.run is not None:
+        wandb.log({"q_values": wandb.Image(fig)})
+
+    plt.close(fig)
 
 if __name__ == "__main__":
     # ------------------
@@ -663,7 +627,7 @@ if __name__ == "__main__":
 
     for idx in indices:
         params = exp.getPermutation(idx)
-        assert params["agent_name"].lower() == "dqn"
+        assert params["agent"].lower() == "dqn"
 
         hypers = params["metaParameters"]
 
@@ -678,9 +642,9 @@ if __name__ == "__main__":
             "LEARNING_STARTS": 1000,
             "TRAINING_INTERVAL": 1,
             "GAMMA": 0.99,
-            "LEARNING_RATE": hypers.get("learning_rate", 2.5e-4),
+            "LEARNING_RATE": hypers.get("learning_rate", 1e-4),
             "LR_LINEAR_DECAY": hypers.get("lr_linear_decay", False),
-            "BUFFER_SIZE": hypers.get("buffer_size", 10000),
+            "BUFFER_SIZE": hypers.get("buffer_size", 100000),
             "BUFFER_BATCH_SIZE": hypers.get("buffer_batch_size", 32),
             "TAU": hypers.get("tau", 1.0),
             "EPSILON_START": hypers.get("epsilon_start", 1.0),
@@ -692,9 +656,6 @@ if __name__ == "__main__":
             "REP_DIM": hypers.get("rep_dim", 64),
             "ACTIVATION": hypers.get("activation", "relu"),
             "VERBOSE": args.verbose,
-            "WANDB_MODE": hypers.get("wandb_mode", "disabled").lower(),
-            "ENTITY": "odiamond-personal",
-            "PROJECT": "feature-attainment",
         }
         if config["ACTIVATION"] == "fta":
             config["FTA_ETA"] = hypers.get("fta_eta", 2)
@@ -702,7 +663,16 @@ if __name__ == "__main__":
             config["FTA_LOWER_BOUND"] = hypers.get("fta_lower_bound", -20)
             config["FTA_UPPER_BOUND"] = hypers.get("fta_upper_bound", 20)
 
-        assert config['NUM_ENVS'] == 1 # For our current exps
+        assert config['NUM_ENVS'] == 1, "Parallel envs is broken with our current truncation handling"
+
+        run = wandb.init(
+            entity=WANDB_ENTITY,
+            project=WANDB_PROJECT,
+            tags=["DQN", config["ENV_NAME"].upper()],
+            name=f'dqn_{config["ENV_NAME"]}_{config["ACTIVATION"]}_idx{idx}_{datetime.datetime.now().strftime("%y-%m-%d-%H-%M-%S")}',
+            config=config,
+            mode=params.get("wandb_mode", "disabled")
+        )
 
         file_context = exp.buildSaveContext(idx)
         file_context.ensureExists()
@@ -748,7 +718,7 @@ if __name__ == "__main__":
         metrics = jax.device_get(results["metrics"])
 
         # save standard metrics into the per-run directory
-        returns = metrics["returned_episode_returns"]
+        returns = metrics["returns"]
         jnp.save(os.path.join(save_dir, "returns.npy"), returns)
         del returns  # Free memory after saving
 
@@ -756,13 +726,18 @@ if __name__ == "__main__":
         jnp.save(os.path.join(save_dir, "loss.npy"), loss)
         del loss  # Free memory after saving
 
+
+        train_state = results["runner_state"][0]
+        network_weights = train_state.params
         
+        # Plot Q-values if we run for 1 seed
+        if config["N_SEEDS"] == 1:
+            plotting_weights = jax.tree_util.tree_map(lambda x: x[0], network_weights) # remove leading seed dimension
+            if config["ENV_NAME"] == "Maze":
+                plot_qvals(plotting_weights, config, save_dir)
+
         # Save network weights
         if params.get("save_weights", False):
-            # Extract train_state from runner_state
-            train_state = results["runner_state"][0]
-            network_weights = train_state.params
-
             # Save network weights as pickle
             with open(os.path.join(save_dir, "network_weights.pkl"), "wb") as f:
                 pickle.dump(network_weights, f)
@@ -804,3 +779,5 @@ if __name__ == "__main__":
 
         del results
         del metrics
+
+        run.finish()

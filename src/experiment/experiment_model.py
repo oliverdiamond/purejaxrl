@@ -11,7 +11,7 @@ class ExperimentModel(ExperimentDescription):
     def __init__(self, d, path):
         super().__init__(d, path)
         self.total_steps = d.get("total_timesteps", None)
-        self.agent = d['agent_name']
+        self.agent = d['agent']
         self.env = d["metaParameters"]["env_name"]
 
     @override

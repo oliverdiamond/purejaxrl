@@ -4,7 +4,7 @@ from .rooms_multitask import TwoRoomsMT, TwoRoomsMT5, TwoRoomsMT15, TwoRoomsMTFi
 
 def make(env_id: str, **env_kwargs):
     if env_id == "Maze":
-        return Maze(**env_kwargs)
+        env = Maze(**env_kwargs)
     elif env_id == "TwoRooms":
         env = TwoRooms(**env_kwargs)
     elif env_id == "TwoRooms5":

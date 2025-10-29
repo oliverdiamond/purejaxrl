@@ -306,9 +306,9 @@ def make_train(config):
                 def print_callback(metrics):
                     if metrics["updates"] % 500 == 0:
                         jax.debug.print(
-                            "updates: {updates}, loss: {loss:.4f}",
+                            "updates: {updates}, losses: {losses:.4f}",
                             updates=metrics["updates"],
-                            loss=metrics["loss"],
+                            losses=metrics["losses"],
                         )
                 jax.debug.callback(print_callback, metrics)
 

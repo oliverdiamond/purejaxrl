@@ -66,12 +66,12 @@ class QNet(nn.Module):
 
         self.head = nn.Sequential(
             [
-            nn.Dense(self.head_hidden_dim, kernel_init=w_init, name="head_hidden1"),
+            nn.Dense(self.head_hidden_dim, kernel_init=w_init, name="post_rep_hidden1"),
             nn.relu,
-            nn.Dense(self.head_hidden_dim, kernel_init=w_init, name="head_hidden2"),
+            nn.Dense(self.head_hidden_dim, kernel_init=w_init, name="post_rep_hidden2"),
             nn.relu,
-            nn.Dense(self.action_dim, kernel_init=w_init, name="head_output")
-            ], 
+            nn.Dense(self.action_dim, kernel_init=w_init, name="output")
+            ],
             name="head",
         )
 
@@ -165,11 +165,11 @@ class QNetFTA(nn.Module):
 
         self.head = nn.Sequential(
             [
-            nn.Dense(self.head_hidden_dim, kernel_init=w_init, name="head_hidden1"),
+            nn.Dense(self.head_hidden_dim, kernel_init=w_init, name="post_rep_hidden1"),
             nn.relu,
-            nn.Dense(self.head_hidden_dim, kernel_init=w_init, name="head_hidden2"),
+            nn.Dense(self.head_hidden_dim, kernel_init=w_init, name="post_rep_hidden2"),
             nn.relu,
-            nn.Dense(self.action_dim, kernel_init=w_init, name="head_output")
+            nn.Dense(self.action_dim, kernel_init=w_init, name="output")
             ], 
             name="head",
         )

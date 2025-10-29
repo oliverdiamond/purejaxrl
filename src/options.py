@@ -18,6 +18,7 @@ import optax
 import flax.linen as nn
 from flax.training.train_state import TrainState
 from flax.linen.initializers import variance_scaling
+from flax.core import freeze, unfreeze
 from src.util.util import load_env_dir
 from src.util.wrappers import LogWrapper, FlattenObservationWrapper
 import gymnax
@@ -34,21 +35,24 @@ from util.fta import fta
 from experiment import experiment_model
 from dqn import QNet, QNetFTA
 
-#TODO Define stopping conditions (STOMP, percentile-based, etc.)
-def make_stopping_condition(config, feature_network, feature_network_params, get_features, option_network, dataset):
-    if config["STOPPING_CONDITION"] == "bonus_weight":
-        assert config["USE_LAST_HIDDEN"], "STOMP stopping condition requires using features from last hidden layer"
-        def bonus_weight_stop_cond(obs, params):
-            option_state_vals = option_network.apply(params, obs).max(axis=-1)  # (num_options, batch_size)
-            main_task_vals = feature_network.apply(feature_network_params, obs).max(axis=-1)  # (num_options, batch_size)
-            #TODO: Finish
-        return bonus_weight_stop_cond
-    if config["STOPPING_CONDITION"] == "bonus_weight_percentile":
-        pass
-        #TODO Finish
-    elif config["STOPPING_CONDITION"] == "percentile":
-        #TODO Determine if feature should be maximized or minimized based on gradient
-        #TODO Figure out what the stopping value should be. Normalized (or unnormalized) feature value with weight coefficient?
+def make_stopping_condition(config, feature_network, feature_network_params, get_features, options_network, dataset, n_options):
+    #TODO Determine if feature should be maximized or minimized based on gradient on the entire dataset (so we can do attainment for hidden layers)
+    if not "no_val" in config["STOPPING_CONDITION"]:
+        assert config["USE_LAST_HIDDEN"] == True, "value-based stopping val needs features to be from last hidden layer"
+        main_params_batched = jax.tree_util.tree_map(
+            lambda arr: jnp.stack([arr] * n_options),
+            feature_network_params
+        )
+        feature_idxs = jnp.arange(n_options)
+        main_params_batched = unfreeze(main_params_batched)
+        new_output_weights = main_params_batched['head']['output']['kernel'].at[feature_idxs, feature_idxs, :].set(config["BONUS_WEIGHT"])
+        main_params_batched['head']['output']['kernel'] = new_output_weights
+        main_params_batched = freeze(main_params_batched)
+        vmap_main_net_apply = jax.vmap(
+                lambda params, inputs: feature_network.apply(params, inputs),
+                in_axes=(0, None)
+            )
+    if "percentile" in config["STOPPING_CONDITION"]:
         dataset_features = feature_network.apply(
             feature_network_params, 
             dataset,
@@ -56,18 +60,56 @@ def make_stopping_condition(config, feature_network, feature_network_params, get
         ) # (dataset_size, n_features)
         percentile = jnp.percentile(
             dataset_features, 
-            config["STOP_PERCENTILE"], 
+            config["STOPPING_PERCENTILE"], 
             axis=0
-        ) # n_features
-        def percentile_stop_cond(obs):
-            batch_features = feature_network.apply(
+        ) # (n_features,)
+    
+    if config["STOPPING_CONDITION"] == "stomp":
+        def stomp_stop_cond(obs, params):
+            greedy_action_idxs = feature_network.apply(feature_network_params, obs).argmax(axis=-1)  # (batch_size,)
+            action_vals_with_bonus = vmap_main_net_apply(feature_net_params, obs)  # (n_features, batch_size, n_actions)
+            state_vals_with_bonus = action_vals_with_bonus[:, jnp.arange(obs.shape[0]), greedy_action_idxs]  # (n_features, batch_size)
+            option_state_vals = options_network.apply(params, obs).max(axis=-1)  # (n_features, batch_size)
+            stop = (state_vals_with_bonus > option_state_vals).astype(jnp.int32)  # (n_features, batch_size)
+
+            return stop, state_vals_with_bonus
+        
+        return stomp_stop_cond
+
+    elif config["STOPPING_CONDITION"] == "stomp_no_val":
+        def stomp_no_val_stop_cond(obs, params):
+            option_state_vals = options_network.apply(params, obs).max(axis=-1)  # (n_features, batch_size)
+            obs_features = feature_network.apply(
                         feature_network_params, 
-                        dataset,
+                        obs,
                         method=get_features
                     ) # (batch_size, n_features)
-            return jnp.transpose(obs > percentile).astype(jnp.int32) # (n_features, batch_size)
+            stop_val = jnp.transpose(wandb.config["BONUS_WEIGHT"] * obs_features) # (n_features, batch_size)
+            stop = (stop_val > option_state_vals).astype(jnp.int32)  # (n_features, batch_size)
+            return stop, stop_val
 
-        return percentile_stop_cond
+        return stomp_no_val_stop_cond
+
+    elif config["STOPPING_CONDITION"] == "percentile":
+        assert config["USE_LAST_HIDDEN"] == True, "value-based stopping val needs features to be from last hidden layer"`
+        def percentile_stop_cond(obs, params):
+            
+            
+
+    elif config["STOPPING_CONDITION"] == "percentile_no_val":
+        #TODO Figure out what the stopping value should be. Normalized (or unnormalized) feature value with weight coefficient?
+        def percentile_no_val_stop_cond(obs):
+            obs_features = feature_network.apply(
+                        feature_network_params, 
+                        obs,
+                        method=get_features
+                    ) # (batch_size, n_features)
+            stop_val = jnp.transpose(config["BONUS_WEIGHT"] * obs_features) # (n_features, batch_size)
+            stop = jnp.transpose(obs_features > percentile).astype(jnp.int32)  # (n_features, batch_size)
+            
+            return stop, stop_val
+
+        return percentile_no_val_stop_cond
     else:
         raise ValueError(f"Unknown stopping condition: {config['STOPPING_CONDITION']}")
     
@@ -195,7 +237,7 @@ def make_train(config):
             
             # Assumes all trunc transitions are discarded during collection
             # TODO: Double check this is correct!
-            target = (
+            target = jax.lax.stop_gradient(
                 learn_batch['reward']
                 + (1 - learn_batch['done']) 
                 * (
@@ -488,15 +530,14 @@ if __name__ == "__main__":
             "ACTIVATION": hypers.get("activation", "relu"),
             "USE_LAST_HIDDEN": hypers.get("use_last_hidden", False),
             "STOPPING_CONDITION": hypers.get("stopping_condition", "stomp"),
+            "BONUS_WEIGHT": hypers.get("bonus_weight", 10),
             "FEATURE_PARAMS": feature_params,
             "FEATURE_NET_DIR": feature_dir,
             "DATASET_DIR": dataset_dir,
             "VERBOSE": args.verbose,
         }
-        if config["STOPPING_CONDITION"] == "stomp":
-            config["BONUS_WEIGHT"] = hypers.get("bonus_weight", 10)
-        elif config["STOPPING_CONDITION"] == "percentile":
-            config["STOP_PERCENTILE"] = hypers.get("stop_percentile", 90)
+        if "percentile" in config["STOPPING_CONDITION"]:
+            config["STOPPING_PERCENTILE"] = hypers.get("stopping_percentile", 90)
         
         if config["USE_LAST_HIDDEN"]:
             assert feature_params['agent'] == 'dqn', "Agent must be 'dqn' when using last hidden layer as features"

@@ -9,6 +9,7 @@ import json
 import time
 import pickle
 import filelock as fl
+from typing import Mapping, cast
 
 import chex
 import flax
@@ -22,22 +23,20 @@ import gymnax
 import flashbax as fbx
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
+import matplotlib.colors as mcolors
 import numpy as np
 
-from environments.maze import Maze
-from environments.maze import EnvState as MazeEnvState
 from environments import make
+from environments.gridworld import EnvState as GridworldEnvState
 from util import get_time_str, WANDB_ENTITY, WANDB_PROJECT
 from util.fta import fta
 from experiment import experiment_model
-
-
 
 class QNet(nn.Module):
     action_dim: int
     conv1_dim: int = 32
     conv2_dim: int = 16
-    rep_dim: int = 64
+    rep_dim: int = 32
     head_hidden_dim: int = 64
 
     def setup(self):
@@ -101,12 +100,37 @@ class QNet(nn.Module):
             "q_values": q
         }
 
+    def get_features(self, x: jnp.ndarray) -> jnp.ndarray:
+        """Returns rep."""
+        # conv backbone
+        x = self.conv_backbone(x)
+        x = x.reshape((x.shape[0], -1))  # Flatten the output
+        # Representation layer
+        rep = self.rep(x)
+
+        return rep
+    
+    def get_last_hidden(self, x: jnp.ndarray) -> jnp.ndarray:
+        "Returns last hidden layer"
+        # conv backbone
+        x = self.conv_backbone(x)
+        x = x.reshape((x.shape[0], -1))  # Flatten the output
+        # Representation layer
+        x = self.rep(x)
+        # Manually apply layers of the head to get the last hidden layer
+        x = self.head.layers[0](x)
+        x = self.head.layers[1](x)
+        x = self.head.layers[2](x)
+        last_hidden = self.head.layers[3](x)
+
+        return last_hidden
+
 
 class QNetFTA(nn.Module):
     action_dim: int
     conv1_dim: int = 32
     conv2_dim: int = 16
-    rep_dim: int = 64
+    rep_dim: int = 32
     head_hidden_dim: int = 64
     fta_eta: float = 2.0
     fta_tiles: int = 20
@@ -175,6 +199,31 @@ class QNetFTA(nn.Module):
             "q_values": q
         }
 
+    def get_features(self, x: jnp.ndarray) -> jnp.ndarray:
+        """Returns rep."""
+        # conv backbone
+        x = self.conv_backbone(x)
+        x = x.reshape((x.shape[0], -1))  # Flatten the output
+        # Representation layer
+        rep = self.rep(x)
+
+        return rep
+    
+    def get_last_hidden(self, x: jnp.ndarray) -> jnp.ndarray:
+        "Returns last hidden layer"
+        # conv backbone
+        x = self.conv_backbone(x)
+        x = x.reshape((x.shape[0], -1))  # Flatten the output
+        # Representation layer
+        x = self.rep(x)
+        # Manually apply layers of the head to get the last hidden layer
+        x = self.head.layers[0](x)
+        x = self.head.layers[1](x)
+        x = self.head.layers[2](x)
+        last_hidden = self.head.layers[3](x)
+
+        return last_hidden
+
 def make_network(config, action_dim):
     """Returns the appropriate network based on the configuration."""
     if config["ACTIVATION"] == "relu":
@@ -215,18 +264,15 @@ def make_train(config):
 
     config["NUM_UPDATES"] = config["TOTAL_TIMESTEPS"] // config["NUM_ENVS"]
 
-    # basic_env, env_params = gymnax.make(config["ENV_NAME"])
-    # env = FlattenObservationWrapper(basic_env)
-    # env = LogWrapper(env) # type: ignore
-    base_env, env_params = make(config["ENV_NAME"]) # type: ignore
-    env = LogWrapper(base_env) # type: ignore
+    base_env, env_params = make(config["ENV_NAME"])
+    env = LogWrapper(base_env)
 
     vmap_reset = lambda n_envs: lambda rng: jax.vmap(env.reset, in_axes=(0, None))(
         jax.random.split(rng, n_envs), env_params
     )
     vmap_step = lambda n_envs: lambda rng, env_state, action: jax.vmap(
-        env.step, in_axes=(0, 0, 0, None)
-    )(jax.random.split(rng, n_envs), env_state, action, env_params)
+        env.step, in_axes=(0, 0, 0, None, None)
+    )(jax.random.split(rng, n_envs), env_state, action, config["GAMMA"], env_params)
 
     def train(rng):
 
@@ -395,11 +441,12 @@ def make_train(config):
                 "timesteps": train_state.timesteps,
                 "updates": train_state.n_updates,
                 "loss": loss.mean(),
-                "returns": info["returned_episode_returns"].mean(),  # avg most recent returns for each par env
+                "discounted_returns": info["returned_episode_discounted_returns"].mean(),
+                "undiscounted_returns": info["returned_episode_returns"].mean(),
             }
 
             # report on wandb if required
-            if config.get("WANDB_MODE", False) == "online":
+            if hypers.get("wandb_mode", False) == "online":
 
                 def callback(metrics):
                     if metrics["timesteps"] % 100 == 0:
@@ -411,11 +458,12 @@ def make_train(config):
                 def print_callback(metrics):
                     if metrics["timesteps"] % 500 == 0:
                         jax.debug.print(
-                            "timesteps: {timesteps}, updates: {updates}, loss: {loss:.4f}, undiscounted_returns: {undiscounted_returns:.4f}",
+                            "timesteps: {timesteps}, updates: {updates}, loss: {loss:.4f}, undiscounted_returns: {undiscounted_returns:.4f}, discounted_returns: {discounted_returns:.4f}",
                             timesteps=metrics["timesteps"],
                             updates=metrics["updates"],
                             loss=metrics["loss"],
-                            undiscounted_returns=metrics["returns"],
+                            undiscounted_returns=metrics["undiscounted_returns"],
+                            discounted_returns=metrics["discounted_returns"],
                         )
                 jax.debug.callback(print_callback, metrics)
 
@@ -438,8 +486,8 @@ def make_train(config):
 
 def plot_qvals(network_params, config, save_dir):
     """Performs a forward pass with final params and visualizes Q-values for all locations in the maze."""
-    basic_env = Maze()
-    env_params = basic_env.default_params
+    # Create environment
+    basic_env, env_params = make(config["ENV_NAME"])
     network = make_network(config, action_dim=basic_env.action_space(env_params).n)
     
     # Get grid dimensions
@@ -459,7 +507,7 @@ def plot_qvals(network_params, config, save_dir):
             
             if not is_obstacle and not is_goal:
                 # Create new state with current agent location
-                current_state = MazeEnvState(
+                current_state = GridworldEnvState(
                     time=0,
                     agent_loc=agent_loc
                 )
@@ -535,10 +583,6 @@ def plot_qvals(network_params, config, save_dir):
                     q_text = f'{float(q_val):.2f}'
                     ax.text(triangle_center_x, triangle_center_y, q_text, ha='center', va='center', fontsize=q_value_fontsize, color='white', weight='bold')
             
-            is_start_loc = any(jnp.array_equal(agent_loc, sl) for sl in basic_env._start_locs)
-            if is_start_loc:
-                ax.text(col + 0.5, plot_row + 0.5, 'S', ha='center', va='center', fontsize=label_fontsize, color='yellow', weight='bold')
-
             rect = patches.Rectangle((col, plot_row), 1, 1, linewidth=edge_linewidth, edgecolor='black', facecolor='none')
             ax.add_patch(rect)
     
@@ -561,6 +605,156 @@ def plot_qvals(network_params, config, save_dir):
     # Log figure to wandb if enabled
     if wandb.run is not None:
         wandb.log({"q_values": wandb.Image(fig)})
+
+    plt.close(fig)
+
+
+def plot_rep_heatmaps(network_params, config, save_dir):
+    """Visualizes representation features as heatmaps across all valid agent locations."""
+    basic_env, env_params = make(config["ENV_NAME"])
+    network = make_network(config, action_dim=basic_env.action_space(env_params).n)
+
+    N = basic_env.N
+    goal_loc = tuple(np.array(basic_env.goal_loc))
+
+    rep_grid = None
+    valid_mask = np.zeros((N, N), dtype=bool)
+
+    # Collect representation values for all grid positions
+    for row in range(N):
+        for col in range(N):
+            agent_loc = jnp.array([row, col])
+
+            is_obstacle = basic_env._obstacles_map[row, col] == 1.0
+            is_goal = jnp.array_equal(agent_loc, basic_env.goal_loc)
+            
+            if is_obstacle or is_goal:
+                continue
+
+            state = GridworldEnvState(time=0, agent_loc=agent_loc)
+            obs = basic_env.get_obs(state, params=env_params)
+            obs_batch = jnp.expand_dims(obs, 0)
+
+            activations = cast(
+                Mapping[str, jnp.ndarray],
+                network.apply(
+                    network_params,
+                    obs_batch,
+                    method=network.get_activations,
+                ),
+            )
+            rep = np.asarray(activations["rep"])[0]
+
+            if rep_grid is None:
+                rep_grid = np.full((N, N, rep.shape[-1]), np.nan, dtype=np.float32)
+
+            rep_grid[row, col, :] = rep
+            valid_mask[row, col] = True
+
+    if rep_grid is None:
+        return
+
+    rep_dim = rep_grid.shape[-1]
+    if config["ACTIVATION"] == "fta":
+        cols = config["FTA_TILES"]
+    else:
+        cols = max(1, math.ceil(math.sqrt(rep_dim)))
+    rows = math.ceil(rep_dim / cols)
+
+    cell_size = max(2.5, min(5.0, 18.0 / max(1, N / 5)))
+    fig_width = cols * cell_size
+    fig_height = rows * cell_size
+    fig, axes = plt.subplots(rows, cols, figsize=(fig_width, fig_height), squeeze=False)
+    axes_flat = axes.flat
+
+    value_fontsize = max(6, min(14, 90 / max(1, N)))
+    edge_linewidth = max(0.3, min(1.0, 8 / N))
+
+    # Create color map
+    cmap = mcolors.LinearSegmentedColormap.from_list(
+        "feature_red",
+        ["#fee5d9", "#fcae91", "#fb6a4a", "#de2d26", "#a50f15"],
+    )
+
+    for feature_idx in range(rep_dim):
+        ax = axes_flat[feature_idx]
+        feature_values = rep_grid[:, :, feature_idx]
+
+        # Compute normalization for this feature
+        valid_values = feature_values[valid_mask]
+        if valid_values.size:
+            feature_min = float(valid_values.min())
+            feature_max = float(valid_values.max())
+            if math.isclose(feature_max, feature_min, rel_tol=1e-6, abs_tol=1e-6):
+                feature_range = 1.0
+            else:
+                feature_range = feature_max - feature_min
+        else:
+            feature_min = feature_max = 0.0
+            feature_range = 1.0
+
+        # Draw the grid using the same approach as plot_qvals
+        for row in range(N):
+            for col in range(N):
+                agent_loc = jnp.array([row, col])
+                is_obstacle = basic_env._obstacles_map[row, col] == 1.0
+                is_goal = jnp.array_equal(agent_loc, basic_env.goal_loc)
+                
+                # Use same coordinate transformation as plot_qvals
+                plot_row = N - 1 - row
+                
+                if is_obstacle:
+                    # Draw obstacle as grey
+                    rect = patches.Rectangle((col, plot_row), 1, 1, linewidth=edge_linewidth, 
+                                            edgecolor='black', facecolor='grey')
+                    ax.add_patch(rect)
+                elif is_goal:
+                    # Draw goal as green
+                    rect = patches.Rectangle((col, plot_row), 1, 1, linewidth=edge_linewidth, 
+                                            edgecolor='black', facecolor='green')
+                    ax.add_patch(rect)
+                    ax.text(col + 0.5, plot_row + 0.5, 'G', ha='center', va='center', 
+                           fontsize=value_fontsize, color='white', weight='bold')
+                else:
+                    # Draw valid cell with color based on feature value
+                    raw_value = feature_values[row, col]
+                    if not np.isnan(raw_value):
+                        # Normalize to [0, 1]
+                        intensity = (raw_value - feature_min) / feature_range if feature_range > 0 else 0.5
+                        
+                        # Get color from colormap
+                        color = cmap(intensity)
+                        
+                        rect = patches.Rectangle((col, plot_row), 1, 1, linewidth=edge_linewidth, 
+                                                edgecolor='black', facecolor=color)
+                        ax.add_patch(rect)
+                        
+                        # Add text with value
+                        text_color = "white" if intensity > 0.6 else "black"
+                        ax.text(col + 0.5, plot_row + 0.5, f'{raw_value:.2f}', 
+                               ha='center', va='center', fontsize=value_fontsize, color=text_color)
+                    else:
+                        # No data - draw as grey
+                        rect = patches.Rectangle((col, plot_row), 1, 1, linewidth=edge_linewidth, 
+                                                edgecolor='black', facecolor='grey')
+                        ax.add_patch(rect)
+
+        ax.set_xlim(0, N)
+        ax.set_ylim(0, N)
+        ax.set_aspect('equal')
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.set_title(f"Feature {feature_idx}", fontsize=value_fontsize + 2)
+
+    for idx in range(rep_dim, len(axes_flat)):
+        axes_flat[idx].axis("off")
+
+    fig.suptitle(f"Feature Activations", fontsize=value_fontsize + 6)
+    plt.tight_layout(rect=(0, 0, 1, 0.96))
+
+    os.makedirs(save_dir, exist_ok=True)
+    save_path = os.path.join(save_dir, f"rep_heatmaps_{config['ENV_NAME']}.png")
+    plt.savefig(save_path, dpi=300, bbox_inches="tight")
 
     plt.close(fig)
 
@@ -647,13 +841,13 @@ if __name__ == "__main__":
             "BUFFER_SIZE": hypers.get("buffer_size", 100000),
             "BUFFER_BATCH_SIZE": hypers.get("buffer_batch_size", 32),
             "TAU": hypers.get("tau", 1.0),
-            "EPSILON_START": hypers.get("epsilon_start", 1.0),
+            "EPSILON_START": hypers.get("epsilon_start", 0.1),
             "EPSILON_FINISH": hypers.get("epsilon_finish", 0.1),
             "EPSILON_ANNEAL_TIME": hypers.get("epsilon_anneal_time", 1),
             "TARGET_UPDATE_INTERVAL": hypers.get("target_update_interval", 64),
             "CONV1_DIM": hypers.get("conv1_dim", 32),
             "CONV2_DIM": hypers.get("conv2_dim", 16),
-            "REP_DIM": hypers.get("rep_dim", 64),
+            "REP_DIM": hypers.get("rep_dim", 32),
             "ACTIVATION": hypers.get("activation", "relu"),
             "VERBOSE": args.verbose,
         }
@@ -718,7 +912,7 @@ if __name__ == "__main__":
         metrics = jax.device_get(results["metrics"])
 
         # save standard metrics into the per-run directory
-        returns = metrics["returns"]
+        returns = metrics["discounted_returns"]
         jnp.save(os.path.join(save_dir, "returns.npy"), returns)
         del returns  # Free memory after saving
 
@@ -733,8 +927,9 @@ if __name__ == "__main__":
         # Plot Q-values if we run for 1 seed
         if config["N_SEEDS"] == 1:
             plotting_weights = jax.tree_util.tree_map(lambda x: x[0], network_weights) # remove leading seed dimension
-            if config["ENV_NAME"] == "Maze":
+            if config["ENV_NAME"] in ["Maze", "TwoRooms"]:
                 plot_qvals(plotting_weights, config, save_dir)
+                plot_rep_heatmaps(plotting_weights, config, save_dir)
 
         # Save network weights
         if params.get("save_weights", False):

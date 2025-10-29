@@ -64,13 +64,15 @@ class FlattenObservationWrapper(GymnaxWrapper):
 class LogEnvState:
     env_state: environment.EnvState
     episode_returns: float
+    discounted_episode_returns: float
     episode_lengths: int
     returned_episode_returns: float
+    returned_episode_discounted_returns: float
     returned_episode_lengths: int
     timestep: int
 
 
-class LogWrapper(GymnaxWrapper): # TODO Add discounted returns
+class LogWrapper(GymnaxWrapper):
     """Log the episode returns and lengths."""
 
     def __init__(self, env: environment.Environment):
@@ -81,7 +83,7 @@ class LogWrapper(GymnaxWrapper): # TODO Add discounted returns
         self, key: chex.PRNGKey, params: Optional[environment.EnvParams] = None
     ) -> Tuple[chex.Array, environment.EnvState]:
         obs, env_state = self._env.reset(key, params)
-        state = LogEnvState(env_state, 0, 0, 0, 0, 0)
+        state = LogEnvState(env_state, 0, 0, 0, 0, 0, 0, 0)
         return obs, state
 
     @partial(jax.jit, static_argnums=(0,))
@@ -90,24 +92,30 @@ class LogWrapper(GymnaxWrapper): # TODO Add discounted returns
         key: chex.PRNGKey,
         state: LogEnvState,
         action: Union[int, float],
+        gamma: Union[int, float],
         params: Optional[environment.EnvParams] = None,
     ) -> Tuple[chex.Array, LogEnvState, float, bool, dict]:
         obs, env_state, reward, done, info = self._env.step(
             key, state.env_state, action, params
         )
         new_episode_return = state.episode_returns + reward
+        new_episode_discounted_return = state.discounted_episode_returns + (reward * (gamma ** state.episode_lengths))
         new_episode_length = state.episode_lengths + 1
         state = LogEnvState(
             env_state=env_state,
             episode_returns=new_episode_return * (1 - done),
+            discounted_episode_returns=new_episode_discounted_return * (1 - done),
             episode_lengths=new_episode_length * (1 - done),
             returned_episode_returns=state.returned_episode_returns * (1 - done)
             + new_episode_return * done,
+            returned_episode_discounted_returns=state.returned_episode_discounted_returns * (1 - done)
+            + new_episode_discounted_return * done,
             returned_episode_lengths=state.returned_episode_lengths * (1 - done)
             + new_episode_length * done,
             timestep=state.timestep + 1,
         )
         info["returned_episode_returns"] = state.returned_episode_returns
+        info["returned_episode_discounted_returns"] = state.returned_episode_discounted_returns
         info["returned_episode_lengths"] = state.returned_episode_lengths
         info["timestep"] = state.timestep
         info["returned_episode"] = done

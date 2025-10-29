@@ -1,1 +1,2 @@
-from .registration import make, make_multitask
+from .registration import make
+from .gridworld import Gridworld, Maze, TwoRooms

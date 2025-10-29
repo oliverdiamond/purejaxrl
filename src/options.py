@@ -45,8 +45,8 @@ def make_stopping_condition(config, feature_network, feature_network_params, get
         )
         feature_idxs = jnp.arange(n_options)
         main_params_batched = unfreeze(main_params_batched)
-        new_output_weights = main_params_batched['head']['output']['kernel'].at[feature_idxs, feature_idxs, :].set(config["BONUS_WEIGHT"])
-        main_params_batched['head']['output']['kernel'] = new_output_weights
+        new_output_weights = main_params_batched['params']['output']['kernel'].at[feature_idxs, feature_idxs, :].set(config["BONUS_WEIGHT"])
+        main_params_batched['params']['output']['kernel'] = new_output_weights
         main_params_batched = freeze(main_params_batched)
         vmap_main_net_apply = jax.vmap(
                 lambda params, inputs: feature_network.apply(params, inputs),
@@ -146,8 +146,8 @@ def make_options_network(config, action_dim, n_options):
     
 def make_feature_network(config, action_dim):
     """Returns the appropriate network based on the configuration."""
-    feature_net_agent = config["FEATURE_NET_PARAMS"]["agent"].lower()
-    feature_net_hypers = config["FEATURE_NET_PARAMS"]["metaParameters"]
+    feature_net_agent = config["FEATURE_PARAMS"]["agent"].lower()
+    feature_net_hypers = config["FEATURE_PARAMS"]["metaParameters"]
     if feature_net_agent == "dqn":
         if feature_net_hypers["activation"] == "relu":
             return QNet(
@@ -196,7 +196,7 @@ def make_train(config):
             init_x,
             method=get_features, # type: ignore
         )
-        n_options = _features.shape[0] # type: ignore
+        n_options = _features.shape[-1] # type: ignore
 
         # OPTIONS NETWORK (seperate ff for each option for now)
         options_network = make_options_network(
@@ -232,7 +232,6 @@ def make_train(config):
                 lambda x: jnp.copy(x), 
                 options_network_params),
             tx=tx,
-            timesteps=0,
             n_updates=0,
         )
 
@@ -274,7 +273,7 @@ def make_train(config):
                 )  # (num_options, batch_size, num_actions)
                 chosen_action_qvals = jnp.take_along_axis(
                     q_vals, # type: ignore
-                    jnp.expand_dims(learn_batch['action'], axis=-1), # (batch_size, 1)
+                    jnp.expand_dims(learn_batch['action'], axis=(0, -1)), # (1, batch_size, 1)
                     axis=-1,
                 ).squeeze(axis=-1)
                 losses = jnp.mean((chosen_action_qvals - target) ** 2, axis=-1)
@@ -571,7 +570,7 @@ if __name__ == "__main__":
             "STOPPING_CONDITION": hypers.get("stopping_condition", "stomp"),
             "BONUS_WEIGHT": hypers.get("bonus_weight", 10),
             "FEATURE_PARAMS": feature_params,
-            "FEATURE_NET_DIR": feature_dir,
+            "FEATURE_DIR": feature_dir,
             "DATASET_DIR": dataset_dir,
             "VERBOSE": args.verbose,
         }
@@ -579,7 +578,8 @@ if __name__ == "__main__":
             config["STOPPING_PERCENTILE"] = hypers.get("stopping_percentile", 90)
         
         if config["USE_LAST_HIDDEN"]:
-            assert feature_params['agent'] == 'dqn', "Agent must be 'dqn' when using last hidden layer as features"
+            print(feature_params)
+            assert feature_params['agent'].lower() == 'dqn', "Agent must be 'dqn' when using last hidden layer as features"
 
         dummy_env, env_params = make(config["ENV_NAME"])
         config["ACTION_DIM"] = dummy_env.action_space(env_params).n
@@ -612,7 +612,7 @@ if __name__ == "__main__":
         }
         config["DATASET_SIZE"] = dataset["obs"].shape[0]
         print(f"Loaded dataset from {dataset_path}")
-        print(f"Dataset shapes - obs: {dataset['obs'].shape}, action: {dataset['action'].shape}, next_obs: {dataset['next_obs'].shape}, reward: {dataset['reward'].shape}, done: {dataset['done'].shape}, truncated: {dataset['truncated'].shape}")
+        print(f"Dataset shapes - obs: {dataset['obs'].shape}, action: {dataset['action'].shape}, next_obs: {dataset['next_obs'].shape}, reward: {dataset['reward'].shape}, done: {dataset['done'].shape}")
 
         file_context = exp.buildSaveContext(idx)
         file_context.ensureExists()

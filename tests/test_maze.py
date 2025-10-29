@@ -1,7 +1,7 @@
 import jax
 import jax.numpy as jnp
 import pytest
-from src.environments.maze import Maze, EnvState, EnvParams
+from archived.maze import Maze, EnvState, EnvParams
 
 @pytest.fixture
 def env():

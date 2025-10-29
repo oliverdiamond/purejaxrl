@@ -637,7 +637,7 @@ def schedule(
     )
     # DO NOT REMOVE. This will prevent you from overburdening the slurm
     # scheduler. Be a good citizen.
-    time.sleep(2)
+    time.sleep(1)
 
 
 def __schedule(

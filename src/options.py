@@ -91,10 +91,22 @@ def make_stopping_condition(config, feature_network, feature_network_params, get
         return stomp_no_val_stop_cond
 
     elif config["STOPPING_CONDITION"] == "percentile":
-        assert config["USE_LAST_HIDDEN"] == True, "value-based stopping val needs features to be from last hidden layer"`
-        def percentile_stop_cond(obs, params):
+        assert config["USE_LAST_HIDDEN"] == True, "value-based stopping val needs features to be from last hidden layer"
+        def percentile_stop_cond(obs):
+            obs_features = feature_network.apply(
+                        feature_network_params, 
+                        obs,
+                        method=get_features
+                    ) # (batch_size, n_features)
+            stop = jnp.transpose(obs_features > percentile).astype(jnp.int32)  # (n_features, batch_size)
+            greedy_action_idxs = feature_network.apply(feature_network_params, obs).argmax(axis=-1)  # (batch_size,)
+            action_vals_with_bonus = vmap_main_net_apply(feature_net_params, obs)  # (n_features, batch_size, n_actions)
+            state_vals_with_bonus = action_vals_with_bonus[:, jnp.arange(obs.shape[0]), greedy_action_idxs]  # (n_features, batch_size)
             
-            
+            return stop, state_vals_with_bonus
+        
+        return percentile_stop_cond
+
 
     elif config["STOPPING_CONDITION"] == "percentile_no_val":
         #TODO Figure out what the stopping value should be. Normalized (or unnormalized) feature value with weight coefficient?
@@ -166,7 +178,7 @@ class CustomTrainState(TrainState):
 
 def make_train(config):
     def train(feature_net_params, dataset, rng):
-        # INIT FEATURE NETWORK AND STOP CONDITION
+        # FEATURE NETWORK
         if config["IMG_OBS"]:
             init_x = jnp.zeros((1,) + config["OBS_SHAPE"])  # Conv layers need extra dimension for batch size
         else:
@@ -186,9 +198,7 @@ def make_train(config):
         )
         n_options = _features.shape[0] # type: ignore
 
-        stop_cond = make_stopping_condition(config)
-
-        # INIT OPTION NETWORK (seperate ff  for each option for now)
+        # OPTIONS NETWORK (seperate ff for each option for now)
         options_network = make_options_network(
             config, 
             action_dim=config["ACTION_DIM"], 
@@ -196,6 +206,17 @@ def make_train(config):
         )
         rng, _rng = jax.random.split(rng)
         options_network_params = options_network.init(_rng, init_x)
+
+        # STOPPING CONDITION
+        stop_cond = make_stopping_condition(
+            config, 
+            feature_network, 
+            feature_net_params, 
+            get_features, 
+            options_network,
+            dataset, 
+            n_options
+        )
 
         def linear_schedule(count):
             frac = 1.0 - (count / config["NUM_UPDATES"])
@@ -309,16 +330,25 @@ def make_train(config):
     return train
 
 def plot_qvals(network_params, config, save_dir):
-    """Performs a forward pass with final params and visualizes Q-values for all locations in the maze."""
+    """Performs a forward pass with final params and visualizes Q-values for all locations in the maze for each option."""
     # Create environment
     basic_env, env_params = make(config["ENV_NAME"])
-    network = make_network(config, action_dim=basic_env.action_space(env_params).n)
     
     # Get grid dimensions
     N = basic_env.N
     
-    # Store Q-values for all agent_location pairs
-    q_values_grid = jnp.zeros((N, N, 4))  # 4 actions: up, right, down, left
+    # Determine n_options from network_params
+    n_options = jax.tree_util.tree_leaves(network_params)[0].shape[0]
+
+    # Create options network
+    options_network = make_options_network(
+        config, 
+        action_dim=basic_env.action_space(env_params).n, 
+        n_options=n_options
+    )
+
+    # Store Q-values for all agent_location pairs for each option
+    q_values_grid = jnp.zeros((n_options, N, N, 4))  # (n_options, N, N, 4 actions)
     
     # Iterate over each location in the grid
     for row in range(N):
@@ -340,95 +370,104 @@ def plot_qvals(network_params, config, save_dir):
                 obs = basic_env.get_obs(current_state, params=env_params)
                 obs_batch = jnp.expand_dims(obs, 0) # Add batch dimension
                 
-                # Forward pass through network
-                q_vals = network.apply(network_params, obs_batch)
-                q_values_grid = q_values_grid.at[row, col].set(q_vals[0])
-    
+                # Forward pass through network for all options
+                q_vals_all_options = options_network.apply(network_params, obs_batch) # (n_options, 1, n_actions)
+                q_values_grid = q_values_grid.at[:, row, col].set(q_vals_all_options[:, 0, :])
+
     # Create visualization
+    cols = int(math.ceil(math.sqrt(n_options)))
+    rows = int(math.ceil(n_options / cols))
+    
     base_fig_size = max(8, N * 0.8)
-    fig_size = min(base_fig_size, 25)
+    fig_size_w = min(base_fig_size * cols, 25 * cols)
+    fig_size_h = min(base_fig_size * rows, 25 * rows)
+
+    fig, axes = plt.subplots(rows, cols, figsize=(fig_size_w, fig_size_h), squeeze=False)
+    axes_flat = axes.flat
+
     q_value_fontsize = max(4, min(10, 80 / N))
     label_fontsize = max(8, min(24, 120 / N))
     edge_linewidth = max(0.3, min(1.0, 8 / N))
-    
-    fig, ax = plt.subplots(1, 1, figsize=(fig_size, fig_size))
-    
-    # Normalize Q-values for color mapping
-    valid_q_values = []
-    for row in range(N):
-        for col in range(N):
-            is_obstacle = basic_env._obstacles_map[row, col] == 1.0
-            is_goal = jnp.array_equal(jnp.array([row, col]), basic_env.goal_loc)
-            if not is_obstacle and not is_goal:
-                valid_q_values.extend(q_values_grid[row, col])
-    
-    if valid_q_values:
-        q_min, q_max = min(valid_q_values), max(valid_q_values)
-        q_range = q_max - q_min if q_max > q_min else 1.0
-    else:
-        q_min, q_max, q_range = 0, 1, 1
 
-    # Draw the grid
-    for row in range(N):
-        for col in range(N):
-            agent_loc = jnp.array([row, col])
-            is_obstacle = basic_env._obstacles_map[row, col] == 1.0
-            is_goal = jnp.array_equal(agent_loc, basic_env.goal_loc)
-            
-            plot_row = N - 1 - row
-            
-            if is_obstacle:
-                rect = patches.Rectangle((col, plot_row), 1, 1, linewidth=edge_linewidth, edgecolor='black', facecolor='black')
-                ax.add_patch(rect)
-            elif is_goal:
-                rect = patches.Rectangle((col, plot_row), 1, 1, linewidth=edge_linewidth, edgecolor='black', facecolor='green')
-                ax.add_patch(rect)
-                ax.text(col + 0.5, plot_row + 0.5, 'G', ha='center', va='center', fontsize=label_fontsize, color='white', weight='bold')
-            else:
-                q_vals = q_values_grid[row, col]
+    for option_idx in range(n_options):
+        ax = axes_flat[option_idx]
+        
+        # Normalize Q-values for color mapping for this option
+        valid_q_values = []
+        for row in range(N):
+            for col in range(N):
+                is_obstacle = basic_env._obstacles_map[row, col] == 1.0
+                is_goal = jnp.array_equal(jnp.array([row, col]), basic_env.goal_loc)
+                if not is_obstacle and not is_goal:
+                    valid_q_values.extend(q_values_grid[option_idx, row, col])
+        
+        if valid_q_values:
+            q_min, q_max = min(valid_q_values), max(valid_q_values)
+            q_range = q_max - q_min if q_max > q_min else 1.0
+        else:
+            q_min, q_max, q_range = 0, 1, 1
+
+        # Draw the grid for this option
+        for row in range(N):
+            for col in range(N):
+                agent_loc = jnp.array([row, col])
+                is_obstacle = basic_env._obstacles_map[row, col] == 1.0
+                is_goal = jnp.array_equal(agent_loc, basic_env.goal_loc)
                 
-                triangles = [
-                    [(col, plot_row + 1), (col + 1, plot_row + 1), (col + 0.5, plot_row + 0.5)],  # up
-                    [(col + 1, plot_row + 1), (col + 1, plot_row), (col + 0.5, plot_row + 0.5)],    # right
-                    [(col + 1, plot_row), (col, plot_row), (col + 0.5, plot_row + 0.5)],      # down
-                    [(col, plot_row), (col, plot_row + 1), (col + 0.5, plot_row + 0.5)]       # left
-                ]
+                plot_row = N - 1 - row
                 
-                for q_val, triangle_verts in zip(q_vals, triangles):
-                    intensity = (q_val - q_min) / q_range if q_range > 0 else 0.5
-                    color_intensity = float(max(0.1, min(1.0, intensity)))
+                if is_obstacle:
+                    rect = patches.Rectangle((col, plot_row), 1, 1, linewidth=edge_linewidth, edgecolor='black', facecolor='black')
+                    ax.add_patch(rect)
+                elif is_goal:
+                    rect = patches.Rectangle((col, plot_row), 1, 1, linewidth=edge_linewidth, edgecolor='black', facecolor='green')
+                    ax.add_patch(rect)
+                    ax.text(col + 0.5, plot_row + 0.5, 'G', ha='center', va='center', fontsize=label_fontsize, color='white', weight='bold')
+                else:
+                    q_vals = q_values_grid[option_idx, row, col]
                     
-                    triangle = patches.Polygon(triangle_verts, closed=True, facecolor=(0, 0, color_intensity, 0.8), edgecolor='black', linewidth=edge_linewidth * 0.5)
-                    ax.add_patch(triangle)
+                    triangles = [
+                        [(col, plot_row + 1), (col + 1, plot_row + 1), (col + 0.5, plot_row + 0.5)],  # up
+                        [(col + 1, plot_row + 1), (col + 1, plot_row), (col + 0.5, plot_row + 0.5)],    # right
+                        [(col + 1, plot_row), (col, plot_row), (col + 0.5, plot_row + 0.5)],      # down
+                        [(col, plot_row), (col, plot_row + 1), (col + 0.5, plot_row + 0.5)]       # left
+                    ]
                     
-                    triangle_center_x = sum(v[0] for v in triangle_verts) / 3
-                    triangle_center_y = sum(v[1] for v in triangle_verts) / 3
-                    
-                    q_text = f'{float(q_val):.2f}'
-                    ax.text(triangle_center_x, triangle_center_y, q_text, ha='center', va='center', fontsize=q_value_fontsize, color='white', weight='bold')
-            
-            rect = patches.Rectangle((col, plot_row), 1, 1, linewidth=edge_linewidth, edgecolor='black', facecolor='none')
-            ax.add_patch(rect)
-    
-    ax.set_xlim(0, N)
-    ax.set_ylim(0, N)
-    ax.set_aspect('equal')
-    ax.set_xticks([])
-    ax.set_yticks([])
-    ax.set_xticklabels([])
-    ax.set_yticklabels([])
-    title_fontsize = max(10, min(16, 100 / N))
-    ax.set_title(f'Action Values for {config["ENV_NAME"]}', fontsize=title_fontsize)
-    ax.grid(True, alpha=0.3, linewidth=edge_linewidth * 0.5)
-    
-    plt.tight_layout()
+                    for q_val, triangle_verts in zip(q_vals, triangles):
+                        intensity = (q_val - q_min) / q_range if q_range > 0 else 0.5
+                        color_intensity = float(max(0.1, min(1.0, intensity)))
+                        
+                        triangle = patches.Polygon(triangle_verts, closed=True, facecolor=(0, 0, color_intensity, 0.8), edgecolor='black', linewidth=edge_linewidth * 0.5)
+                        ax.add_patch(triangle)
+                        
+                        triangle_center_x = sum(v[0] for v in triangle_verts) / 3
+                        triangle_center_y = sum(v[1] for v in triangle_verts) / 3
+                        
+                        q_text = f'{float(q_val):.2f}'
+                        ax.text(triangle_center_x, triangle_center_y, q_text, ha='center', va='center', fontsize=q_value_fontsize, color='white', weight='bold')
+                
+                rect = patches.Rectangle((col, plot_row), 1, 1, linewidth=edge_linewidth, edgecolor='black', facecolor='none')
+                ax.add_patch(rect)
+        
+        ax.set_xlim(0, N)
+        ax.set_ylim(0, N)
+        ax.set_aspect('equal')
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.set_xt_labels([])
+        ax.set_yt_labels([])
+        title_fontsize = max(10, min(16, 100 / N))
+        ax.set_title(f'Option {option_idx} Q-Values', fontsize=title_fontsize)
+        ax.grid(True, alpha=0.3, linewidth=edge_linewidth * 0.5)
+
+    for i in range(n_options, len(axes_flat)):
+        axes_flat[i].axis('off')
+
+    fig.suptitle(f'Option Action Values for {config["ENV_NAME"]}. \n Stopping Condition: {config["STOPPING_CONDITION"]}, Bonus weight: {config["BONUS_WEIGHT"]}, Use last hidden layer: {config["USE_LAST_HIDDEN"]}', fontsize=max(12, min(20, 120 / N)))
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
     os.makedirs(save_dir, exist_ok=True)
     save_path = os.path.join(save_dir, f'q_vals_{config["ENV_NAME"]}.png')
     plt.savefig(save_path, dpi=300, bbox_inches='tight')
-
-    # Log figure to wandb if enabled
-    if wandb.run is not None:
-        wandb.log({"q_values": wandb.Image(fig)})
 
     plt.close(fig)
 
@@ -595,7 +634,7 @@ if __name__ == "__main__":
             rngs = jax.random.split(rng, config['N_SEEDS'])
 
             train = make_train(config)
-            # Outer vmap over feature_net_weights, inner vmap over seeds
+            # Outer vmap over num unique feature_net_weights, inner vmap over seeds
             train_jit = jax.jit(
                 jax.vmap(
                     jax.vmap(train, in_axes=(None, None, 0)),
@@ -635,24 +674,22 @@ if __name__ == "__main__":
         loss = metrics["loss"]
         jnp.save(os.path.join(save_dir, "loss.npy"), loss)
         del loss  # Free memory after saving
-
-
-        train_state = results["runner_state"][0]
-        option_network_weights = train_state.params
+        
+        options_weights = results["runner_state"][0].params
         
         # Plot Q-values if we run for 1 seed
-        if config["N_SEEDS"] == 1:
-            plotting_weights = jax.tree_util.tree_map(lambda x: x[0], network_weights) # remove leading seed dimension
+        if config["N_SEEDS"] == 1 and feature_params['metaParameters']['n_seeds'] == 1:
+            plotting_weights = jax.tree_util.tree_map(lambda x: x[0][0], options_weights) # remove leading num unique feature_net_weights and seeds dimensions
             if config["ENV_NAME"] in ["Maze", "TwoRooms"]:
                 plot_qvals(plotting_weights, config, save_dir)
-                plot_rep_heatmaps(plotting_weights, config, save_dir)
+                # plot_rep_heatmaps(plotting_weights, config, save_dir) # This would need to be adapted for options
 
         # Save network weights
         if params.get("save_weights", False):
             # Save network weights as pickle
-            with open(os.path.join(save_dir, "network_weights.pkl"), "wb") as f:
-                pickle.dump(network_weights, f)
-            print(f"Saved network weights for idx {idx}")
+            with open(os.path.join(save_dir, "options_weights.pkl"), "wb") as f:
+                pickle.dump(options_weights, f)
+            print(f"Saved options network weights for idx {idx}")
 
         # save params for this idx as JSON
         try:
@@ -690,5 +727,3 @@ if __name__ == "__main__":
 
         del results
         del metrics
-
-        run.finish()

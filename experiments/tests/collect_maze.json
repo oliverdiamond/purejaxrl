@@ -1,0 +1,10 @@
+{
+    "agent": "random",
+    "wandb_mode": "disabled",
+    "metaParameters": {
+        "total_timesteps": 20000,
+        "seed": 0,
+        "num_envs": 1,
+        "env_name": "Maze"
+    }
+}

@@ -33,7 +33,7 @@ from environments.gridworld import EnvState as GridworldEnvState
 from util import get_time_str, WANDB_ENTITY, WANDB_PROJECT
 from util.fta import fta
 from experiment import experiment_model
-from dqn import QNet, QNetFTA
+from dqn import QNet, QNetFTA, QNetLinear
 
 def make_stopping_condition(config, feature_network, feature_network_params, get_features, options_network, dataset, n_options):
     #TODO Determine if feature should be maximized or minimized based on gradient on the entire dataset (so we can do attainment for hidden layers)
@@ -141,6 +141,18 @@ def make_options_network(config, action_dim, n_options):
           conv1_dim=config["CONV1_DIM"], 
           conv2_dim=config["CONV2_DIM"], 
           rep_dim=config["REP_DIM"])
+
+    elif config["ACTIVATION"] == "linear":
+        return nn.vmap(
+            QNetLinear,
+            variable_axes={'params': 0},
+            split_rngs={'params': True},
+            in_axes=(None,),
+            out_axes=0,
+            axis_size=n_options,
+            methods=['__call__']
+        )(action_dim=action_dim)
+
     else:
         raise ValueError("Option learning currently only supports ReLU activations")
     
@@ -168,7 +180,11 @@ def make_feature_network(config, action_dim):
                 fta_tiles=feature_net_hypers.get("fta_tiles", 20),
                 fta_lower_bound=feature_net_hypers.get("fta_lower_bound", -20.0),
                 fta_upper_bound=feature_net_hypers.get("fta_upper_bound", 20.0),
-            )            
+            )        
+        elif feature_net_hypers["activation"] == "linear":
+            return QNetLinear(
+                action_dim=action_dim
+            )
     else:
         raise ValueError(f"Unknown feature network: {feature_net_agent}")
 
@@ -225,7 +241,10 @@ def make_train(config):
             return config["LEARNING_RATE"] * frac
 
         lr = linear_schedule if config.get("LR_LINEAR_DECAY", False) else config["LEARNING_RATE"]
-        tx = optax.adam(learning_rate=lr)
+        if config["OPT"] == 'adam':
+            tx = optax.adam(learning_rate=lr)
+        elif config["OPT"] == 'sgd':
+            tx = optax.sgd(learning_rate=lr)
 
         train_state = CustomTrainState.create(
             apply_fn=options_network.apply,
@@ -812,6 +831,7 @@ if __name__ == "__main__":
             "NUM_UPDATES": hypers["num_updates"],
             "GAMMA": 0.99,
             "LEARNING_RATE": hypers.get("learning_rate", 1e-4),
+            "OPT": hypers.get("opt", "adam"),
             "LR_LINEAR_DECAY": hypers.get("lr_linear_decay", False),
             "BATCH_SIZE": hypers.get("batch_size", 32),
             "TAU": hypers.get("tau", 1.0),

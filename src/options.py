@@ -348,8 +348,45 @@ def plot_qvals(network_params, config, save_dir):
         n_options=n_options
     )
 
-    # Store Q-values for all agent_location pairs for each option
+    # Load feature network and dataset for stopping condition
+    with open(os.path.join(config["FEATURE_DIR"], "network_weights.pkl"), "rb") as f:
+        feature_net_params = pickle.load(f)
+    
+    # Handle case where feature_net_params might have seed dimension
+    feature_net_params = jax.tree_util.tree_map(lambda x: x[0], feature_net_params)
+    
+    dataset_path = os.path.join(config["DATASET_DIR"], "dataset.npz")
+    data = np.load(dataset_path)
+    dataset = {
+        "obs": jnp.array(data["obs"]),
+        "action": jnp.array(data["action"]),
+        "next_obs": jnp.array(data["next_obs"]),
+        "reward": jnp.array(data["reward"]),
+        "done": jnp.array(data["done"]),
+    }
+    
+    # Create feature network and stopping condition
+    feature_network = make_feature_network(config, action_dim=basic_env.action_space(env_params).n)
+    
+    if config['USE_LAST_HIDDEN']:
+        get_features = feature_network.get_last_hidden
+    else:
+        get_features = feature_network.get_features
+    
+    stop_cond = make_stopping_condition(
+        config, 
+        feature_network, 
+        feature_net_params, 
+        get_features, 
+        options_network,
+        dataset['obs'], 
+        n_options
+    )
+
+    # Store Q-values and stopping info for all agent_location pairs for each option
     q_values_grid = jnp.zeros((n_options, N, N, 4))  # (n_options, N, N, 4 actions)
+    stop_grid = jnp.zeros((n_options, N, N), dtype=jnp.int32)  # (n_options, N, N)
+    stop_val_grid = jnp.zeros((n_options, N, N))  # (n_options, N, N)
     
     # Iterate over each location in the grid
     for row in range(N):
@@ -374,6 +411,14 @@ def plot_qvals(network_params, config, save_dir):
                 # Forward pass through network for all options
                 q_vals_all_options = options_network.apply(network_params, obs_batch) # (n_options, 1, n_actions)
                 q_values_grid = q_values_grid.at[:, row, col].set(q_vals_all_options[:, 0, :])
+                
+                # Get stopping condition for this state
+                if "percentile" in config["STOPPING_CONDITION"]:
+                    stop, stop_val = stop_cond(obs_batch)  # (n_options, 1)
+                else:
+                    stop, stop_val = stop_cond(obs_batch, network_params)  # (n_options, 1)
+                stop_grid = stop_grid.at[:, row, col].set(stop[:, 0])
+                stop_val_grid = stop_val_grid.at[:, row, col].set(stop_val[:, 0])
 
     # Create visualization
     cols = int(math.ceil(math.sqrt(n_options)))
@@ -447,8 +492,14 @@ def plot_qvals(network_params, config, save_dir):
                         q_text = f'{float(q_val):.2f}'
                         ax.text(triangle_center_x, triangle_center_y, q_text, ha='center', va='center', fontsize=q_value_fontsize, color='white', weight='bold')
                 
-                rect = patches.Rectangle((col, plot_row), 1, 1, linewidth=edge_linewidth, edgecolor='black', facecolor='none')
-                ax.add_patch(rect)
+                # Add green outline if stopping condition is met for this option
+                if stop_grid[option_idx, row, col] == 1:
+                    rect_outline = patches.Rectangle((col, plot_row), 1, 1, linewidth=edge_linewidth * 3, 
+                                                     edgecolor='lime', facecolor='none')
+                    ax.add_patch(rect_outline)
+                else:
+                    rect = patches.Rectangle((col, plot_row), 1, 1, linewidth=edge_linewidth, edgecolor='black', facecolor='none')
+                    ax.add_patch(rect)
         
         ax.set_xlim(0, N)
         ax.set_ylim(0, N)
@@ -471,6 +522,195 @@ def plot_qvals(network_params, config, save_dir):
     plt.savefig(save_path, dpi=300, bbox_inches='tight')
 
     plt.close(fig)
+
+
+def plot_stopping_values(network_params, config, save_dir):
+    """Visualizes stopping values for all locations in the maze for each option."""
+    # Create environment
+    basic_env, env_params = make(config["ENV_NAME"])
+    
+    # Get grid dimensions
+    N = basic_env.N
+    
+    # Determine n_options from network_params
+    n_options = jax.tree_util.tree_leaves(network_params)[0].shape[0]
+
+    # Create options network
+    options_network = make_options_network(
+        config, 
+        action_dim=basic_env.action_space(env_params).n, 
+        n_options=n_options
+    )
+
+    # Load feature network and dataset for stopping condition
+    with open(os.path.join(config["FEATURE_DIR"], "network_weights.pkl"), "rb") as f:
+        feature_net_params = pickle.load(f)
+    
+    # Handle case where feature_net_params might have seed dimension
+    feature_net_params = jax.tree_util.tree_map(lambda x: x[0], feature_net_params)
+    
+    dataset_path = os.path.join(config["DATASET_DIR"], "dataset.npz")
+    data = np.load(dataset_path)
+    dataset = {
+        "obs": jnp.array(data["obs"]),
+        "action": jnp.array(data["action"]),
+        "next_obs": jnp.array(data["next_obs"]),
+        "reward": jnp.array(data["reward"]),
+        "done": jnp.array(data["done"]),
+    }
+    
+    # Create feature network and stopping condition
+    feature_network = make_feature_network(config, action_dim=basic_env.action_space(env_params).n)
+    
+    if config['USE_LAST_HIDDEN']:
+        get_features = feature_network.get_last_hidden
+    else:
+        get_features = feature_network.get_features
+    
+    stop_cond = make_stopping_condition(
+        config, 
+        feature_network, 
+        feature_net_params, 
+        get_features, 
+        options_network,
+        dataset['obs'], 
+        n_options
+    )
+
+    # Store stopping values for all agent_location pairs for each option
+    stop_val_grid = jnp.zeros((n_options, N, N))  # (n_options, N, N)
+    
+    # Iterate over each location in the grid
+    for row in range(N):
+        for col in range(N):
+            agent_loc = jnp.array([row, col])
+            
+            # Check if this is a valid location for the agent (not an obstacle)
+            is_obstacle = basic_env._obstacles_map[row, col] == 1.0
+            is_goal = jnp.array_equal(agent_loc, basic_env.goal_loc)
+            
+            if not is_obstacle and not is_goal:
+                # Create new state with current agent location
+                current_state = GridworldEnvState(
+                    time=0,
+                    agent_loc=agent_loc
+                )
+                
+                # Generate observation for this state
+                obs = basic_env.get_obs(current_state, params=env_params)
+                obs_batch = jnp.expand_dims(obs, 0) # Add batch dimension
+                
+                # Get stopping value for this state
+                if "percentile" in config["STOPPING_CONDITION"]:
+                    stop, stop_val = stop_cond(obs_batch)  # (n_options, 1)
+                else:
+                    stop, stop_val = stop_cond(obs_batch, network_params)  # (n_options, 1)
+                stop_val_grid = stop_val_grid.at[:, row, col].set(stop_val[:, 0])
+
+    # Create visualization
+    cols = int(math.ceil(math.sqrt(n_options)))
+    rows = int(math.ceil(n_options / cols))
+    
+    base_fig_size = max(8, N * 0.8)
+    fig_size_w = min(base_fig_size * cols, 25 * cols)
+    fig_size_h = min(base_fig_size * rows, 25 * rows)
+
+    fig, axes = plt.subplots(rows, cols, figsize=(fig_size_w, fig_size_h), squeeze=False)
+    axes_flat = axes.flat
+
+    value_fontsize = max(6, min(14, 90 / max(1, N)))
+    label_fontsize = max(8, min(24, 120 / N))
+    edge_linewidth = max(0.3, min(1.0, 8 / N))
+
+    # Create color map (red gradient)
+    cmap = mcolors.LinearSegmentedColormap.from_list(
+        "stopping_red",
+        ["#fee5d9", "#fcae91", "#fb6a4a", "#de2d26", "#a50f15"],
+    )
+
+    for option_idx in range(n_options):
+        ax = axes_flat[option_idx]
+        
+        # Compute normalization for this option
+        valid_stop_values = []
+        for row in range(N):
+            for col in range(N):
+                is_obstacle = basic_env._obstacles_map[row, col] == 1.0
+                is_goal = jnp.array_equal(jnp.array([row, col]), basic_env.goal_loc)
+                if not is_obstacle and not is_goal:
+                    valid_stop_values.append(float(stop_val_grid[option_idx, row, col]))
+        
+        if valid_stop_values:
+            stop_min = min(valid_stop_values)
+            stop_max = max(valid_stop_values)
+            if math.isclose(stop_max, stop_min, rel_tol=1e-6, abs_tol=1e-6):
+                stop_range = 1.0
+            else:
+                stop_range = stop_max - stop_min
+        else:
+            stop_min = stop_max = 0.0
+            stop_range = 1.0
+
+        # Draw the grid for this option
+        for row in range(N):
+            for col in range(N):
+                agent_loc = jnp.array([row, col])
+                is_obstacle = basic_env._obstacles_map[row, col] == 1.0
+                is_goal = jnp.array_equal(agent_loc, basic_env.goal_loc)
+                
+                plot_row = N - 1 - row
+                
+                if is_obstacle:
+                    rect = patches.Rectangle((col, plot_row), 1, 1, linewidth=edge_linewidth, 
+                                            edgecolor='black', facecolor='grey')
+                    ax.add_patch(rect)
+                elif is_goal:
+                    rect = patches.Rectangle((col, plot_row), 1, 1, linewidth=edge_linewidth, 
+                                            edgecolor='black', facecolor='green')
+                    ax.add_patch(rect)
+                    ax.text(col + 0.5, plot_row + 0.5, 'G', ha='center', va='center', 
+                           fontsize=label_fontsize, color='white', weight='bold')
+                else:
+                    # Draw valid cell with color based on stopping value
+                    stop_value = float(stop_val_grid[option_idx, row, col])
+                    
+                    # Normalize to [0, 1]
+                    intensity = (stop_value - stop_min) / stop_range if stop_range > 0 else 0.5
+                    
+                    # Get color from colormap
+                    color = cmap(intensity)
+                    
+                    rect = patches.Rectangle((col, plot_row), 1, 1, linewidth=edge_linewidth, 
+                                            edgecolor='black', facecolor=color)
+                    ax.add_patch(rect)
+                    
+                    # Add text with value
+                    text_color = "white" if intensity > 0.6 else "black"
+                    ax.text(col + 0.5, plot_row + 0.5, f'{stop_value:.2f}', 
+                           ha='center', va='center', fontsize=value_fontsize, color=text_color)
+
+        ax.set_xlim(0, N)
+        ax.set_ylim(0, N)
+        ax.set_aspect('equal')
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.set_xticklabels([])
+        ax.set_yticklabels([])
+        title_fontsize = max(10, min(16, 100 / N))
+        ax.set_title(f'Option {option_idx} Stopping Values', fontsize=title_fontsize)
+        ax.grid(True, alpha=0.3, linewidth=edge_linewidth * 0.5)
+
+    for i in range(n_options, len(axes_flat)):
+        axes_flat[i].axis('off')
+
+    fig.suptitle(f'Stopping Values for {config["ENV_NAME"]}. \n Stopping Condition: {config["STOPPING_CONDITION"]} \n Bonus weight: {config["BONUS_WEIGHT"]} \n Use last hidden layer: {config["USE_LAST_HIDDEN"]}', fontsize=max(12, min(20, 120 / N)))
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+    os.makedirs(save_dir, exist_ok=True)
+    save_path = os.path.join(save_dir, f'stopping_vals_{config["ENV_NAME"]}.png')
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+
+    plt.close(fig)
+
 
 if __name__ == "__main__":
     # ------------------
@@ -684,6 +924,7 @@ if __name__ == "__main__":
             plotting_weights = jax.tree_util.tree_map(lambda x: x[0][0], options_weights) # remove leading num unique feature_net_weights and seeds dimensions
             if config["ENV_NAME"] in ["Maze", "TwoRooms"]:
                 plot_qvals(plotting_weights, config, save_dir)
+                plot_stopping_values(plotting_weights, config, save_dir)
                 # plot_rep_heatmaps(plotting_weights, config, save_dir) # This would need to be adapted for options
 
         # Save network weights

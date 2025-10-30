@@ -18,7 +18,7 @@ import optax
 import flax.linen as nn
 from flax.training.train_state import TrainState
 from flax.linen.initializers import variance_scaling
-from src.util.wrappers import LogWrapper, FlattenObservationWrapper
+from util.wrappers import LogWrapper, FlattenObservationWrapper
 import gymnax
 import flashbax as fbx
 import matplotlib.pyplot as plt

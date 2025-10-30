@@ -1,0 +1,17 @@
+matplotlib
+pandas
+jax[cuda12]>=0.2.26
+jaxlib[cuda12]>=0.1.74
+jaxtyping>=0.2.34
+gymnax
+evosax
+distrax
+optax
+flax
+brax
+numpy
+flashbax
+navix
+wandb
+filelock
+PyExpUtils-andnp~=7.0

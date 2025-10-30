@@ -19,8 +19,8 @@ import flax.linen as nn
 from flax.training.train_state import TrainState
 from flax.linen.initializers import variance_scaling
 from flax.core import freeze, unfreeze
-from src.util.util import load_env_dir
-from src.util.wrappers import LogWrapper, FlattenObservationWrapper
+from util.util import load_env_dir
+from util.wrappers import LogWrapper, FlattenObservationWrapper
 import gymnax
 import flashbax as fbx
 import matplotlib.pyplot as plt
@@ -84,7 +84,7 @@ def make_stopping_condition(config, feature_network, feature_network_params, get
                         obs,
                         method=get_features
                     ) # (batch_size, n_features)
-            stop_val = jnp.transpose(wandb.config["BONUS_WEIGHT"] * obs_features) # (n_features, batch_size)
+            stop_val = jnp.transpose(config["BONUS_WEIGHT"] * obs_features) # (n_features, batch_size)
             stop = (stop_val > option_state_vals).astype(jnp.int32)  # (n_features, batch_size)
             return stop, stop_val
 

@@ -55,7 +55,7 @@ def make_stopping_condition(config, feature_network, feature_network_params, get
     if "percentile" in config["STOPPING_CONDITION"]:
         dataset_features = feature_network.apply(
             feature_network_params, 
-            dataset,
+            dataset["obs"],
             method=get_features
         ) # (dataset_size, n_features)
         percentile = jnp.percentile(
@@ -92,7 +92,7 @@ def make_stopping_condition(config, feature_network, feature_network_params, get
 
     elif config["STOPPING_CONDITION"] == "percentile":
         assert config["USE_LAST_HIDDEN"] == True, "value-based stopping val needs features to be from last hidden layer"
-        def percentile_stop_cond(obs):
+        def percentile_stop_cond(obs, params=None):
             obs_features = feature_network.apply(
                         feature_network_params, 
                         obs,
@@ -110,7 +110,7 @@ def make_stopping_condition(config, feature_network, feature_network_params, get
 
     elif config["STOPPING_CONDITION"] == "percentile_no_val":
         #TODO Figure out what the stopping value should be. Normalized (or unnormalized) feature value with weight coefficient?
-        def percentile_no_val_stop_cond(obs):
+        def percentile_no_val_stop_cond(obs, params=None):
             obs_features = feature_network.apply(
                         feature_network_params, 
                         obs,
@@ -398,7 +398,7 @@ def plot_qvals(network_params, config, save_dir):
         feature_net_params, 
         get_features, 
         options_network,
-        dataset['obs'], 
+        dataset, 
         n_options
     )
 
@@ -596,7 +596,7 @@ def plot_stopping_values(network_params, config, save_dir):
         feature_net_params, 
         get_features, 
         options_network,
-        dataset['obs'], 
+        dataset, 
         n_options
     )
 

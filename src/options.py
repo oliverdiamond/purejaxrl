@@ -492,14 +492,18 @@ def plot_qvals(network_params, config, save_dir):
                         q_text = f'{float(q_val):.2f}'
                         ax.text(triangle_center_x, triangle_center_y, q_text, ha='center', va='center', fontsize=q_value_fontsize, color='white', weight='bold')
                 
-                # Add green outline if stopping condition is met for this option
+                # Add black cell border
+                rect = patches.Rectangle((col, plot_row), 1, 1, linewidth=edge_linewidth, edgecolor='black', facecolor='none')
+                ax.add_patch(rect)
+        
+        # Add green outlines for stopping conditions in a second pass (to ensure they're on top)
+        for row in range(N):
+            for col in range(N):
+                plot_row = N - 1 - row
                 if stop_grid[option_idx, row, col] == 1:
                     rect_outline = patches.Rectangle((col, plot_row), 1, 1, linewidth=edge_linewidth * 3, 
-                                                     edgecolor='lime', facecolor='none')
+                                                     edgecolor='lime', facecolor='none', zorder=10)
                     ax.add_patch(rect_outline)
-                else:
-                    rect = patches.Rectangle((col, plot_row), 1, 1, linewidth=edge_linewidth, edgecolor='black', facecolor='none')
-                    ax.add_patch(rect)
         
         ax.set_xlim(0, N)
         ax.set_ylim(0, N)
@@ -579,6 +583,7 @@ def plot_stopping_values(network_params, config, save_dir):
 
     # Store stopping values for all agent_location pairs for each option
     stop_val_grid = jnp.zeros((n_options, N, N))  # (n_options, N, N)
+    stop_grid = jnp.zeros((n_options, N, N))  # (n_options, N, N) for binary stopping decisions
     
     # Iterate over each location in the grid
     for row in range(N):
@@ -606,6 +611,7 @@ def plot_stopping_values(network_params, config, save_dir):
                 else:
                     stop, stop_val = stop_cond(obs_batch, network_params)  # (n_options, 1)
                 stop_val_grid = stop_val_grid.at[:, row, col].set(stop_val[:, 0])
+                stop_grid = stop_grid.at[:, row, col].set(stop[:, 0])
 
     # Create visualization
     cols = int(math.ceil(math.sqrt(n_options)))
@@ -688,6 +694,15 @@ def plot_stopping_values(network_params, config, save_dir):
                     text_color = "white" if intensity > 0.6 else "black"
                     ax.text(col + 0.5, plot_row + 0.5, f'{stop_value:.2f}', 
                            ha='center', va='center', fontsize=value_fontsize, color=text_color)
+        
+        # Add green outlines for stopping conditions in a second pass (to ensure they're on top)
+        for row in range(N):
+            for col in range(N):
+                plot_row = N - 1 - row
+                if stop_grid[option_idx, row, col] == 1:
+                    rect_outline = patches.Rectangle((col, plot_row), 1, 1, linewidth=edge_linewidth * 3, 
+                                                     edgecolor='lime', facecolor='none', zorder=10)
+                    ax.add_patch(rect_outline)
 
         ax.set_xlim(0, N)
         ax.set_ylim(0, N)

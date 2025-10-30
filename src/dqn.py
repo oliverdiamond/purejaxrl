@@ -231,7 +231,8 @@ def make_network(config, action_dim):
             action_dim=action_dim,
             conv1_dim=config["CONV1_DIM"],
             conv2_dim=config["CONV2_DIM"],
-            rep_dim=config["REP_DIM"]
+            rep_dim=config["REP_DIM"],
+            head_hidden_dim=config["HEAD_HIDDEN_DIM"]
         )
     elif config["ACTIVATION"] == "fta":
         return QNetFTA(
@@ -239,6 +240,7 @@ def make_network(config, action_dim):
             conv1_dim=config["CONV1_DIM"],
             conv2_dim=config["CONV2_DIM"],
             rep_dim=config["REP_DIM"],
+            head_hidden_dim=config["HEAD_HIDDEN_DIM"],
             fta_eta=config["FTA_ETA"],
             fta_tiles=config["FTA_TILES"],
             fta_lower_bound=config["FTA_LOWER_BOUND"],
@@ -609,18 +611,18 @@ def plot_qvals(network_params, config, save_dir):
     plt.close(fig)
 
 
-def plot_rep_heatmaps(network_params, config, save_dir):
-    """Visualizes representation features as heatmaps across all valid agent locations."""
+def _plot_feature_heatmaps(network_params, config, save_dir, method_name, title, filename):
+    """Helper function to create heatmaps for any feature extraction method."""
     basic_env, env_params = make(config["ENV_NAME"])
     network = make_network(config, action_dim=basic_env.action_space(env_params).n)
 
     N = basic_env.N
     goal_loc = tuple(np.array(basic_env.goal_loc))
 
-    rep_grid = None
+    feature_grid = None
     valid_mask = np.zeros((N, N), dtype=bool)
 
-    # Collect representation values for all grid positions
+    # Collect feature values for all grid positions
     for row in range(N):
         for col in range(N):
             agent_loc = jnp.array([row, col])
@@ -635,31 +637,29 @@ def plot_rep_heatmaps(network_params, config, save_dir):
             obs = basic_env.get_obs(state, params=env_params)
             obs_batch = jnp.expand_dims(obs, 0)
 
-            activations = cast(
-                Mapping[str, jnp.ndarray],
-                network.apply(
-                    network_params,
-                    obs_batch,
-                    method=network.get_activations,
-                ),
+            # Get features using the specified method
+            features = network.apply(
+                network_params,
+                obs_batch,
+                method=getattr(network, method_name),
             )
-            rep = np.asarray(activations["rep"])[0]
+            features = np.asarray(features)[0]
 
-            if rep_grid is None:
-                rep_grid = np.full((N, N, rep.shape[-1]), np.nan, dtype=np.float32)
+            if feature_grid is None:
+                feature_grid = np.full((N, N, features.shape[-1]), np.nan, dtype=np.float32)
 
-            rep_grid[row, col, :] = rep
+            feature_grid[row, col, :] = features
             valid_mask[row, col] = True
 
-    if rep_grid is None:
+    if feature_grid is None:
         return
 
-    rep_dim = rep_grid.shape[-1]
-    if config["ACTIVATION"] == "fta":
+    feature_dim = feature_grid.shape[-1]
+    if config["ACTIVATION"] == "fta" and method_name == "get_features":
         cols = config["FTA_TILES"]
     else:
-        cols = max(1, math.ceil(math.sqrt(rep_dim)))
-    rows = math.ceil(rep_dim / cols)
+        cols = max(1, math.ceil(math.sqrt(feature_dim)))
+    rows = math.ceil(feature_dim / cols)
 
     cell_size = max(2.5, min(5.0, 18.0 / max(1, N / 5)))
     fig_width = cols * cell_size
@@ -676,9 +676,9 @@ def plot_rep_heatmaps(network_params, config, save_dir):
         ["#fee5d9", "#fcae91", "#fb6a4a", "#de2d26", "#a50f15"],
     )
 
-    for feature_idx in range(rep_dim):
+    for feature_idx in range(feature_dim):
         ax = axes_flat[feature_idx]
-        feature_values = rep_grid[:, :, feature_idx]
+        feature_values = feature_grid[:, :, feature_idx]
 
         # Compute normalization for this feature
         valid_values = feature_values[valid_mask]
@@ -746,17 +746,40 @@ def plot_rep_heatmaps(network_params, config, save_dir):
         ax.set_yticks([])
         ax.set_title(f"Feature {feature_idx}", fontsize=value_fontsize + 2)
 
-    for idx in range(rep_dim, len(axes_flat)):
+    for idx in range(feature_dim, len(axes_flat)):
         axes_flat[idx].axis("off")
 
-    fig.suptitle(f"Feature Activations", fontsize=value_fontsize + 6)
+    fig.suptitle(title, fontsize=value_fontsize + 6)
     plt.tight_layout(rect=(0, 0, 1, 0.96))
 
     os.makedirs(save_dir, exist_ok=True)
-    save_path = os.path.join(save_dir, f"rep_heatmaps_{config['ENV_NAME']}.png")
+    save_path = os.path.join(save_dir, filename)
     plt.savefig(save_path, dpi=300, bbox_inches="tight")
 
     plt.close(fig)
+
+
+def plot_rep_heatmaps(network_params, config, save_dir):
+    """Visualizes representation features and last hidden layer as heatmaps across all valid agent locations."""
+    # Plot representation layer heatmaps
+    _plot_feature_heatmaps(
+        network_params, 
+        config, 
+        save_dir, 
+        "get_features", 
+        "Representation Layer Activations", 
+        f"rep_heatmaps_{config['ENV_NAME']}.png"
+    )
+    
+    # Plot last hidden layer heatmaps
+    _plot_feature_heatmaps(
+        network_params, 
+        config, 
+        save_dir, 
+        "get_last_hidden", 
+        "Last Hidden Layer Activations", 
+        f"last_hidden_heatmaps_{config['ENV_NAME']}.png"
+    )
 
 if __name__ == "__main__":
     # ------------------
@@ -848,6 +871,7 @@ if __name__ == "__main__":
             "CONV1_DIM": hypers.get("conv1_dim", 32),
             "CONV2_DIM": hypers.get("conv2_dim", 16),
             "REP_DIM": hypers.get("rep_dim", 32),
+            "HEAD_HIDDEN_DIM": hypers.get("head_hidden_dim", 64),
             "ACTIVATION": hypers.get("activation", "relu"),
             "VERBOSE": args.verbose,
         }

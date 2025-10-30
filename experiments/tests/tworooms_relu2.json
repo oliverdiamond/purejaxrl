@@ -3,7 +3,7 @@
     "save_weights": true,
     "wandb_mode": "disabled",
     "metaParameters": {
-        "total_timesteps": 100000,
+        "total_timesteps": 3000,
         "seed": 0,
         "n_seeds": 1,
         "env_name": "TwoRooms",

@@ -154,7 +154,8 @@ def make_feature_network(config, action_dim):
                 action_dim=action_dim,
                 conv1_dim=feature_net_hypers.get("conv1_dim", 32),
                 conv2_dim=feature_net_hypers.get("conv2_dim", 16),
-                rep_dim=feature_net_hypers.get("rep_dim", 32)
+                rep_dim=feature_net_hypers.get("rep_dim", 32),
+                head_hidden_dim=feature_net_hypers.get("head_hidden_dim", 64)
             )
         elif feature_net_hypers["activation"] == "fta":
             return QNetFTA(
@@ -162,6 +163,7 @@ def make_feature_network(config, action_dim):
                 conv1_dim=feature_net_hypers.get('conv1_dim', 32),
                 conv2_dim=feature_net_hypers.get('conv2_dim', 16),
                 rep_dim=feature_net_hypers.get('rep_dim', 32),
+                head_hidden_dim=feature_net_hypers.get("head_hidden_dim", 64),
                 fta_eta=feature_net_hypers.get('fta_eta', 2),
                 fta_tiles=feature_net_hypers.get("fta_tiles", 20),
                 fta_lower_bound=feature_net_hypers.get("fta_lower_bound", -20.0),
@@ -306,7 +308,7 @@ def make_train(config):
                 def print_callback(metrics):
                     if metrics["updates"] % 500 == 0:
                         jax.debug.print(
-                            "updates: {updates}, losses: {losses:.4f}",
+                            "updates: {updates}, losses: {losses}",
                             updates=metrics["updates"],
                             losses=metrics["losses"],
                         )
@@ -453,8 +455,8 @@ def plot_qvals(network_params, config, save_dir):
         ax.set_aspect('equal')
         ax.set_xticks([])
         ax.set_yticks([])
-        ax.set_xt_labels([])
-        ax.set_yt_labels([])
+        ax.set_xticklabels([])
+        ax.set_yticklabels([])
         title_fontsize = max(10, min(16, 100 / N))
         ax.set_title(f'Option {option_idx} Q-Values', fontsize=title_fontsize)
         ax.grid(True, alpha=0.3, linewidth=edge_linewidth * 0.5)
@@ -462,7 +464,7 @@ def plot_qvals(network_params, config, save_dir):
     for i in range(n_options, len(axes_flat)):
         axes_flat[i].axis('off')
 
-    fig.suptitle(f'Option Action Values for {config["ENV_NAME"]}. \n Stopping Condition: {config["STOPPING_CONDITION"]}, Bonus weight: {config["BONUS_WEIGHT"]}, Use last hidden layer: {config["USE_LAST_HIDDEN"]}', fontsize=max(12, min(20, 120 / N)))
+    fig.suptitle(f'Option Action Values for {config["ENV_NAME"]}. \n Stopping Condition: {config["STOPPING_CONDITION"]} \n Bonus weight: {config["BONUS_WEIGHT"]} \n Use last hidden layer: {config["USE_LAST_HIDDEN"]}', fontsize=max(12, min(20, 120 / N)))
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
     os.makedirs(save_dir, exist_ok=True)
     save_path = os.path.join(save_dir, f'q_vals_{config["ENV_NAME"]}.png')
@@ -671,9 +673,9 @@ if __name__ == "__main__":
 
         metrics = jax.device_get(results["metrics"])
 
-        loss = metrics["loss"]
-        jnp.save(os.path.join(save_dir, "loss.npy"), loss)
-        del loss  # Free memory after saving
+        losses = metrics["losses"]
+        jnp.save(os.path.join(save_dir, "loss.npy"), losses)
+        del losses  # Free memory after saving
         
         options_weights = results["runner_state"][0].params
         

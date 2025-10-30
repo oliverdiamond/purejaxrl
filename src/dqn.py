@@ -126,6 +126,30 @@ class QNet(nn.Module):
         return last_hidden
 
 
+class QNetLinear(nn.Module):
+    action_dim: int
+
+    def setup(self):
+        #NOTE Does not use bias
+        self.head = nn.Dense(self.action_dim, use_bias=False, name="output")
+
+    def __call__(self, x: jnp.ndarray):
+        q = self.head(x)
+        return q
+
+    def get_activations(self, x: jnp.ndarray) -> dict[str, jnp.ndarray]:
+        """Returns intermediate activations."""
+        q = self.head(x)
+        return {
+            "rep": x,
+            "q_values": q
+        }
+
+    def get_features(self, x: jnp.ndarray) -> jnp.ndarray:
+        """Returns rep."""
+        return x
+
+
 class QNetFTA(nn.Module):
     action_dim: int
     conv1_dim: int = 32
@@ -246,6 +270,10 @@ def make_network(config, action_dim):
             fta_lower_bound=config["FTA_LOWER_BOUND"],
             fta_upper_bound=config["FTA_UPPER_BOUND"]
         )
+    elif config["ACTIVATION"] == "linear":
+        return QNetLinear(
+            action_dim=action_dim
+        )
     else:
         raise ValueError(f"Unknown network name: {config['NETWORK_NAME']}")
 
@@ -314,7 +342,10 @@ def make_train(config):
             return config["LEARNING_RATE"] * frac
 
         lr = linear_schedule if config.get("LR_LINEAR_DECAY", False) else config["LEARNING_RATE"]
-        tx = optax.adam(learning_rate=lr)
+        if config["OPT"] == 'adam':
+            tx = optax.adam(learning_rate=lr)
+        elif config["OPT"] == 'sgd':
+            tx = optax.sgd(learning_rate=lr)
 
         train_state = CustomTrainState.create(
             apply_fn=network.apply,
@@ -859,6 +890,7 @@ if __name__ == "__main__":
             "LEARNING_STARTS": 1000,
             "TRAINING_INTERVAL": 1,
             "GAMMA": 0.99,
+            "OPT": hypers.get("opt", "adam"),
             "LEARNING_RATE": hypers.get("learning_rate", 1e-4),
             "LR_LINEAR_DECAY": hypers.get("lr_linear_decay", False),
             "BUFFER_SIZE": hypers.get("buffer_size", 100000),

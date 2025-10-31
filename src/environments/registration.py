@@ -1,15 +1,11 @@
-from .gridworld import MazeRGB, TwoRoomsRGB, MazeOneHot, TwoRoomsOneHot
+from . import gridworld
 
 def make(env_id: str, **env_kwargs):
-    if env_id == "MazeRGB":
-        env = MazeRGB(**env_kwargs)
-    elif env_id == "TwoRoomsRGB":
-        env = TwoRoomsRGB(**env_kwargs)
-    elif env_id == "MazeOneHot":
-        env = MazeOneHot(**env_kwargs)
-    elif env_id == "TwoRoomsOneHot":
-        env = TwoRoomsOneHot(**env_kwargs)
+    # Dynamically get the class from gridworld module by name
+    if hasattr(gridworld, env_id):
+        env_class = getattr(gridworld, env_id)
+        env = env_class(**env_kwargs)
     else:
-        raise ValueError("Environment ID is not assosiated with a registered Single Task Env.")
+        raise ValueError(f"Environment ID '{env_id}' is not associated with a registered Single Task Env.")
 
     return env, env.default_params

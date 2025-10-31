@@ -122,6 +122,21 @@ def make_stopping_condition(config, feature_network, feature_network_params, get
             return stop, stop_val
 
         return percentile_no_val_stop_cond
+    
+    elif config["STOPPING_CONDITION"] == "percentile_val_only":
+        assert config["USE_LAST_HIDDEN"] == True, "value-based stopping val needs features to be from last hidden layer"
+        def percentile_stop_cond(obs, params=None):
+            obs_features = feature_network.apply(
+                        feature_network_params, 
+                        obs,
+                        method=get_features
+                    ) # (batch_size, n_features)
+            stop = jnp.transpose(obs_features > percentile).astype(jnp.int32)  # (n_features, batch_size)
+            state_vals = feature_network.apply(feature_network_params, obs).max(axis=-1)  # (batch_size,)
+            state_vals = jnp.tile(state_vals, (n_options, 1))  # (n_features, batch_size)
+            return stop, state_vals
+        
+        return percentile_stop_cond
     else:
         raise ValueError(f"Unknown stopping condition: {config['STOPPING_CONDITION']}")
     

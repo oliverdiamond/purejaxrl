@@ -24,7 +24,8 @@ def tworooms_onehot_env():
 
 # Test MazeRGB
 def test_maze_rgb_init(maze_rgb_env):
-    assert maze_rgb_env.N == 15
+    assert maze_rgb_env.H == 15
+    assert maze_rgb_env.W == 15
     assert maze_rgb_env.num_actions == 4
     assert maze_rgb_env.goal_loc.shape == (2,)
     assert maze_rgb_env._obstacles_map.shape == (15, 15)
@@ -52,7 +53,11 @@ def test_maze_rgb_step(maze_rgb_env):
     # Test a valid move
     action = 0  # Move up
     start_loc = state.agent_loc
-    new_loc_expected = jnp.clip(start_loc + maze_rgb_env.directions[action], 0, maze_rgb_env.N - 1)
+    new_loc_expected = start_loc + maze_rgb_env.directions[action]
+    new_loc_expected = jnp.array([
+        jnp.clip(new_loc_expected[0], 0, maze_rgb_env.H - 1),
+        jnp.clip(new_loc_expected[1], 0, maze_rgb_env.W - 1)
+    ])
     
     # Manually check if the new location is an obstacle
     is_obstacle = maze_rgb_env._obstacles_map[new_loc_expected[0], new_loc_expected[1]] == 1.0
@@ -103,11 +108,14 @@ def test_maze_rgb_get_obs(maze_rgb_env):
 
 # Test MazeOneHot
 def test_maze_onehot_init(maze_onehot_env):
-    assert maze_onehot_env.N == 15
+    assert maze_onehot_env.H == 15
+    assert maze_onehot_env.W == 15
     assert maze_onehot_env.num_actions == 4
     assert maze_onehot_env.goal_loc.shape == (2,)
     assert maze_onehot_env._obstacles_map.shape == (15, 15)
     assert maze_onehot_env._start_locs.shape[0] > 0
+    assert maze_onehot_env._num_valid_locs > 0
+    assert maze_onehot_env._num_valid_locs == maze_onehot_env._start_locs.shape[0]  # valid locs = start locs
     assert maze_onehot_env.name == "MazeOneHot"
 
 def test_maze_onehot_reset(maze_onehot_env):
@@ -115,7 +123,8 @@ def test_maze_onehot_reset(maze_onehot_env):
     params = maze_onehot_env.default_params
     obs, state = maze_onehot_env.reset_env(key, params)
     assert obs.shape == maze_onehot_env.observation_space(params).shape
-    assert obs.shape == (225,)  # 15 * 15
+    assert obs.shape == (maze_onehot_env._num_valid_locs,)
+    assert obs.shape[0] < 15 * 15  # Should be less than total grid size (excludes obstacles and goal)
     assert state.time == 0
     assert state.agent_loc.shape == (2,)
     # Check if start location is valid
@@ -130,9 +139,10 @@ def test_maze_onehot_get_obs(maze_onehot_env):
     params = maze_onehot_env.default_params
     state = EnvState(time=0, agent_loc=jnp.array([1, 1]))
     obs = maze_onehot_env.get_obs(state, params)
-    assert obs.shape == (225,)  # 15 * 15
-    # Check one-hot encoding: position (1,1) should be at index 1*15 + 1 = 16
-    expected_idx = 1 * 15 + 1
+    assert obs.shape == (maze_onehot_env._num_valid_locs,)
+    # Check one-hot encoding: the position should map to a valid index
+    expected_idx = maze_onehot_env._pos_to_idx[1, 1]
+    assert expected_idx >= 0  # Valid index
     assert obs[expected_idx] == 1.0
     assert jnp.sum(obs) == 1.0
 
@@ -144,13 +154,14 @@ def test_maze_onehot_step(maze_onehot_env):
     action = 1  # Move right
     obs, new_state, reward, done, info = maze_onehot_env.step_env(key, state, action, params)
 
-    assert obs.shape == (225,)
+    assert obs.shape == (maze_onehot_env._num_valid_locs,)
     assert new_state.time == state.time + 1
     assert jnp.sum(obs) == 1.0  # Still one-hot
 
 # Test TwoRoomsRGB
 def test_tworooms_rgb_init(tworooms_rgb_env):
-    assert tworooms_rgb_env.N == 5
+    assert tworooms_rgb_env.H == 5
+    assert tworooms_rgb_env.W == 5
     assert tworooms_rgb_env.num_actions == 4
     assert jnp.array_equal(tworooms_rgb_env.goal_loc, jnp.array([0, 4]))
     assert tworooms_rgb_env._obstacles_map.shape == (5, 5)
@@ -191,18 +202,22 @@ def test_tworooms_rgb_get_obs(tworooms_rgb_env):
 
 # Test TwoRoomsOneHot
 def test_tworooms_onehot_init(tworooms_onehot_env):
-    assert tworooms_onehot_env.N == 5
+    assert tworooms_onehot_env.H == 5
+    assert tworooms_onehot_env.W == 5
     assert tworooms_onehot_env.num_actions == 4
     assert jnp.array_equal(tworooms_onehot_env.goal_loc, jnp.array([0, 4]))
     assert tworooms_onehot_env._obstacles_map.shape == (5, 5)
     assert tworooms_onehot_env._start_locs.shape[0] > 0
+    assert tworooms_onehot_env._num_valid_locs > 0
+    assert tworooms_onehot_env._num_valid_locs == tworooms_onehot_env._start_locs.shape[0] + 10
     assert tworooms_onehot_env.name == "TwoRoomsOneHot"
 
 def test_tworooms_onehot_reset(tworooms_onehot_env):
     key = jax.random.PRNGKey(0)
     params = tworooms_onehot_env.default_params
     obs, state = tworooms_onehot_env.reset_env(key, params)
-    assert obs.shape == (25,)  # 5 * 5
+    assert obs.shape == (tworooms_onehot_env._num_valid_locs,)
+    assert obs.shape[0] < 5 * 5  # Should be less than total grid size
     assert state.time == 0
     # Check agent starts in first room
     assert state.agent_loc[1] < 2
@@ -213,9 +228,10 @@ def test_tworooms_onehot_get_obs(tworooms_onehot_env):
     params = tworooms_onehot_env.default_params
     state = EnvState(time=0, agent_loc=jnp.array([2, 1]))
     obs = tworooms_onehot_env.get_obs(state, params)
-    assert obs.shape == (25,)
-    # Check one-hot encoding: position (2,1) should be at index 2*5 + 1 = 11
-    expected_idx = 2 * 5 + 1
+    assert obs.shape == (tworooms_onehot_env._num_valid_locs,)
+    # Check one-hot encoding: the position should map to a valid index
+    expected_idx = tworooms_onehot_env._pos_to_idx[2, 1]
+    assert expected_idx >= 0  # Valid index
     assert obs[expected_idx] == 1.0
     assert jnp.sum(obs) == 1.0
 
@@ -227,7 +243,7 @@ def test_tworooms_onehot_step(tworooms_onehot_env):
     action = 1  # Move right
     obs, new_state, reward, done, info = tworooms_onehot_env.step_env(key, state, action, params)
 
-    assert obs.shape == (25,)
+    assert obs.shape == (tworooms_onehot_env._num_valid_locs,)
     assert new_state.time == state.time + 1
     assert jnp.sum(obs) == 1.0
 
@@ -307,3 +323,144 @@ def test_tworooms_obstacles_correct(tworooms_rgb_env):
     # Test non-obstacle positions
     assert tworooms_rgb_env._obstacles_map[0, 0] == 0.0
     assert tworooms_rgb_env._obstacles_map[0, 4] == 0.0
+
+# Test penalty region functionality
+def test_default_penalty_map():
+    """Test that default environments have no penalty regions."""
+    env = MazeRGB()
+    assert jnp.all(env._penalty_map == 0.0)
+    
+    env = TwoRoomsOneHot()
+    assert jnp.all(env._penalty_map == 0.0)
+
+def test_custom_penalty_region():
+    """Test custom environment with penalty region."""
+    from src.environments.gridworld import TwoRoomsMixin, GridworldOneHot
+    
+    class TwoRoomsOneHotWithPenalty(TwoRoomsMixin, GridworldOneHot):
+        def __init__(self):
+            super().__init__(H=5, W=5, goal_loc=jnp.array([0, 4]))
+        
+        def _get_penalty_map(self):
+            """Define a penalty region in the second room."""
+            _map = jnp.zeros([self.H, self.W])
+            # Set the second room (columns 3-4) as penalty region with -1 reward
+            _map = _map.at[:, 3:5].set(-1.0)
+            return _map
+        
+        @property
+        def name(self) -> str:
+            return "TwoRoomsOneHotWithPenalty"
+    
+    env = TwoRoomsOneHotWithPenalty()
+    
+    # Check penalty map is correctly set
+    assert env._penalty_map[0, 3] == -1.0
+    assert env._penalty_map[0, 4] == -1.0
+    assert env._penalty_map[0, 0] == 0.0
+    assert env._penalty_map[0, 1] == 0.0
+
+def test_penalty_reward():
+    """Test that agent receives -1 reward in penalty regions."""
+    from src.environments.gridworld import TwoRoomsMixin, GridworldOneHot
+    
+    class TwoRoomsOneHotWithPenalty(TwoRoomsMixin, GridworldOneHot):
+        def __init__(self):
+            super().__init__(H=5, W=5, goal_loc=jnp.array([0, 4]))
+        
+        def _get_penalty_map(self):
+            """Define a penalty region in the second room."""
+            _map = jnp.zeros([self.H, self.W])
+            # Set the second room (columns 3-4) as penalty region with -1 reward
+            _map = _map.at[:, 3:5].set(-1.0)
+            return _map
+        
+        @property
+        def name(self) -> str:
+            return "TwoRoomsOneHotWithPenalty"
+    
+    env = TwoRoomsOneHotWithPenalty()
+    params = env.default_params
+    key = jax.random.PRNGKey(0)
+    
+    # Test moving into penalty region (from doorway at [2,2] to [2,3])
+    state = EnvState(time=0, agent_loc=jnp.array([2, 2]))
+    action = 1  # right
+    obs, new_state, reward, done, info = env.step_env(key, state, action, params)
+    
+    assert new_state.agent_loc[0] == 2
+    assert new_state.agent_loc[1] == 3
+    assert reward == -1.0  # Penalty
+    
+    # Test moving in normal region (no penalty)
+    state = EnvState(time=0, agent_loc=jnp.array([0, 0]))
+    action = 1  # right
+    obs, new_state, reward, done, info = env.step_env(key, state, action, params)
+    
+    assert new_state.agent_loc[0] == 0
+    assert new_state.agent_loc[1] == 1
+    assert reward == 0.0  # No penalty, no goal
+
+def test_penalty_and_goal():
+    """Test that goal reward and penalty are combined correctly."""
+    from src.environments.gridworld import TwoRoomsMixin, GridworldOneHot
+    
+    class TwoRoomsOneHotWithPenalty(TwoRoomsMixin, GridworldOneHot):
+        def __init__(self):
+            super().__init__(H=5, W=5, goal_loc=jnp.array([0, 4]))
+        
+        def _get_penalty_map(self):
+            """Define a penalty region that includes the goal."""
+            _map = jnp.zeros([self.H, self.W])
+            # Set the second room (columns 3-4) as penalty region with -1 reward
+            _map = _map.at[:, 3:5].set(-1.0)
+            return _map
+        
+        @property
+        def name(self) -> str:
+            return "TwoRoomsOneHotWithPenalty"
+    
+    env = TwoRoomsOneHotWithPenalty()
+    params = env.default_params
+    key = jax.random.PRNGKey(0)
+    
+    # Test reaching goal which is in penalty region
+    state = EnvState(time=0, agent_loc=jnp.array([0, 3]))
+    action = 1  # right to reach goal at [0, 4]
+    obs, new_state, reward, done, info = env.step_env(key, state, action, params)
+    
+    assert jnp.array_equal(new_state.agent_loc, env.goal_loc)
+    assert reward == 0.0  # Goal (+1) + Penalty (-1) = 0
+    assert done  # Episode should terminate at goal
+
+def test_penalty_normal_goal():
+    """Test environment where goal is not in penalty region."""
+    from src.environments.gridworld import TwoRoomsMixin, GridworldOneHot
+    
+    class TwoRoomsOneHotWithPenalty(TwoRoomsMixin, GridworldOneHot):
+        def __init__(self):
+            super().__init__(H=5, W=5, goal_loc=jnp.array([0, 4]))
+        
+        def _get_penalty_map(self):
+            """Define a penalty region that doesn't include the goal."""
+            _map = jnp.zeros([self.H, self.W])
+            # Set only column 3 as penalty region (goal is at column 4)
+            _map = _map.at[:, 3].set(-1.0)
+            return _map
+        
+        @property
+        def name(self) -> str:
+            return "TwoRoomsOneHotWithPenalty"
+    
+    env = TwoRoomsOneHotWithPenalty()
+    params = env.default_params
+    key = jax.random.PRNGKey(0)
+    
+    # Test reaching goal which is NOT in penalty region
+    state = EnvState(time=0, agent_loc=jnp.array([0, 3]))
+    action = 1  # right to reach goal at [0, 4]
+    obs, new_state, reward, done, info = env.step_env(key, state, action, params)
+    
+    assert jnp.array_equal(new_state.agent_loc, env.goal_loc)
+    assert reward == 1.0  # Goal (+1) only, no penalty
+    assert done

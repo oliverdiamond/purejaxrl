@@ -27,7 +27,7 @@ import matplotlib.colors as mcolors
 import numpy as np
 
 from environments import make
-from environments.gridworld import EnvState as GridworldEnvState
+from environments.gridworld import EnvState as GridworldEnvState, Gridworld
 from util import get_time_str, WANDB_ENTITY, WANDB_PROJECT
 from util.fta import fta
 from experiment import experiment_model
@@ -148,6 +148,10 @@ class QNetLinear(nn.Module):
     def get_features(self, x: jnp.ndarray) -> jnp.ndarray:
         """Returns rep."""
         return x
+
+    def get_last_hidden(self, x: jnp.ndarray) -> jnp.ndarray:
+        "Returns last hidden layer"
+        return x  # No hidden layers, so just return input
 
 
 class QNetFTA(nn.Module):
@@ -524,14 +528,15 @@ def plot_qvals(network_params, config, save_dir):
     network = make_network(config, action_dim=basic_env.action_space(env_params).n)
     
     # Get grid dimensions
-    N = basic_env.N
+    H = basic_env.H
+    W = basic_env.W
     
     # Store Q-values for all agent_location pairs
-    q_values_grid = jnp.zeros((N, N, 4))  # 4 actions: up, right, down, left
+    q_values_grid = jnp.zeros((H, W, 4))  # 4 actions: up, right, down, left
     
     # Iterate over each location in the grid
-    for row in range(N):
-        for col in range(N):
+    for row in range(H):
+        for col in range(W):
             agent_loc = jnp.array([row, col])
             
             # Check if this is a valid location for the agent (not an obstacle)
@@ -554,18 +559,19 @@ def plot_qvals(network_params, config, save_dir):
                 q_values_grid = q_values_grid.at[row, col].set(q_vals[0])
     
     # Create visualization
-    base_fig_size = max(8, N * 0.8)
+    max_dim = max(H, W)
+    base_fig_size = max(8, max_dim * 0.8)
     fig_size = min(base_fig_size, 25)
-    q_value_fontsize = max(4, min(10, 80 / N))
-    label_fontsize = max(8, min(24, 120 / N))
-    edge_linewidth = max(0.3, min(1.0, 8 / N))
+    q_value_fontsize = max(4, min(10, 80 / max_dim))
+    label_fontsize = max(8, min(24, 120 / max_dim))
+    edge_linewidth = max(0.3, min(1.0, 8 / max_dim))
     
-    fig, ax = plt.subplots(1, 1, figsize=(fig_size, fig_size))
+    fig, ax = plt.subplots(1, 1, figsize=(fig_size * W / max_dim, fig_size * H / max_dim))
     
     # Normalize Q-values for color mapping
     valid_q_values = []
-    for row in range(N):
-        for col in range(N):
+    for row in range(H):
+        for col in range(W):
             is_obstacle = basic_env._obstacles_map[row, col] == 1.0
             is_goal = jnp.array_equal(jnp.array([row, col]), basic_env.goal_loc)
             if not is_obstacle and not is_goal:
@@ -578,13 +584,13 @@ def plot_qvals(network_params, config, save_dir):
         q_min, q_max, q_range = 0, 1, 1
 
     # Draw the grid
-    for row in range(N):
-        for col in range(N):
+    for row in range(H):
+        for col in range(W):
             agent_loc = jnp.array([row, col])
             is_obstacle = basic_env._obstacles_map[row, col] == 1.0
             is_goal = jnp.array_equal(agent_loc, basic_env.goal_loc)
             
-            plot_row = N - 1 - row
+            plot_row = H - 1 - row
             
             if is_obstacle:
                 rect = patches.Rectangle((col, plot_row), 1, 1, linewidth=edge_linewidth, edgecolor='black', facecolor='black')
@@ -615,18 +621,56 @@ def plot_qvals(network_params, config, save_dir):
                     
                     q_text = f'{float(q_val):.2f}'
                     ax.text(triangle_center_x, triangle_center_y, q_text, ha='center', va='center', fontsize=q_value_fontsize, color='white', weight='bold')
+                
+                # Add white arrows for best action(s)
+                # Round Q-values to thousandths place for comparison
+                rounded_q_vals = [round(float(q), 3) for q in q_vals]
+                max_q = max(rounded_q_vals)
+                best_actions = [i for i, q in enumerate(rounded_q_vals) if q == max_q]
+                
+                # Direction vectors for each action: up, right, down, left
+                directions = [
+                    (0, 0.2),   # up
+                    (0.2, 0),   # right
+                    (0, -0.2),  # down
+                    (-0.2, 0)   # left
+                ]
+                
+                arrow_width = max(0.06, min(0.1, 0.6 / max_dim))
+                arrow_head_width = arrow_width * 3
+                arrow_head_length = arrow_width * 1.5
+                
+                for action_idx in best_actions:
+                    dx, dy = directions[action_idx]
+                    ax.arrow(col + 0.5, plot_row + 0.5, dx, dy, 
+                            head_width=arrow_head_width, head_length=arrow_head_length, 
+                            fc='white', ec='black', linewidth=edge_linewidth * 0.5, 
+                            zorder=12, length_includes_head=True)
+            
+            # Add yellow dot in upper right if this state is in a penalty region
+            has_penalty = basic_env._penalty_map[row, col] != 0.0
+            if has_penalty and not is_obstacle and not is_goal:
+                dot_size = max(20, min(100, 400 / max_dim))
+                ax.scatter(col + 0.85, plot_row + 0.85, s=dot_size, c='yellow', 
+                          edgecolors='black', linewidths=edge_linewidth, zorder=10)
+            
+            # Add green 'S' in upper right if this is a start state
+            is_start = any(jnp.array_equal(agent_loc, start_loc) for start_loc in basic_env._start_locs)
+            if is_start and not is_obstacle and not is_goal:
+                ax.text(col + 0.85, plot_row + 0.85, 'S', ha='center', va='center', 
+                       fontsize=label_fontsize, color='green', weight='bold', zorder=11)
             
             rect = patches.Rectangle((col, plot_row), 1, 1, linewidth=edge_linewidth, edgecolor='black', facecolor='none')
             ax.add_patch(rect)
     
-    ax.set_xlim(0, N)
-    ax.set_ylim(0, N)
+    ax.set_xlim(0, W)
+    ax.set_ylim(0, H)
     ax.set_aspect('equal')
     ax.set_xticks([])
     ax.set_yticks([])
     ax.set_xticklabels([])
     ax.set_yticklabels([])
-    title_fontsize = max(10, min(16, 100 / N))
+    title_fontsize = max(10, min(16, 100 / max_dim))
     ax.set_title(f'Action Values for {config["ENV_NAME"]}', fontsize=title_fontsize)
     ax.grid(True, alpha=0.3, linewidth=edge_linewidth * 0.5)
     
@@ -647,15 +691,16 @@ def _plot_feature_heatmaps(network_params, config, save_dir, method_name, title,
     basic_env, env_params = make(config["ENV_NAME"])
     network = make_network(config, action_dim=basic_env.action_space(env_params).n)
 
-    N = basic_env.N
+    H = basic_env.H
+    W = basic_env.W
     goal_loc = tuple(np.array(basic_env.goal_loc))
 
     feature_grid = None
-    valid_mask = np.zeros((N, N), dtype=bool)
+    valid_mask = np.zeros((H, W), dtype=bool)
 
     # Collect feature values for all grid positions
-    for row in range(N):
-        for col in range(N):
+    for row in range(H):
+        for col in range(W):
             agent_loc = jnp.array([row, col])
 
             is_obstacle = basic_env._obstacles_map[row, col] == 1.0
@@ -677,7 +722,7 @@ def _plot_feature_heatmaps(network_params, config, save_dir, method_name, title,
             features = np.asarray(features)[0]
 
             if feature_grid is None:
-                feature_grid = np.full((N, N, features.shape[-1]), np.nan, dtype=np.float32)
+                feature_grid = np.full((H, W, features.shape[-1]), np.nan, dtype=np.float32)
 
             feature_grid[row, col, :] = features
             valid_mask[row, col] = True
@@ -692,14 +737,15 @@ def _plot_feature_heatmaps(network_params, config, save_dir, method_name, title,
         cols = max(1, math.ceil(math.sqrt(feature_dim)))
     rows = math.ceil(feature_dim / cols)
 
-    cell_size = max(2.5, min(5.0, 18.0 / max(1, N / 5)))
+    max_dim = max(H, W)
+    cell_size = max(2.5, min(5.0, 18.0 / max(1, max_dim / 5)))
     fig_width = cols * cell_size
     fig_height = rows * cell_size
     fig, axes = plt.subplots(rows, cols, figsize=(fig_width, fig_height), squeeze=False)
     axes_flat = axes.flat
 
-    value_fontsize = max(6, min(14, 90 / max(1, N)))
-    edge_linewidth = max(0.3, min(1.0, 8 / N))
+    value_fontsize = max(6, min(14, 90 / max(1, max_dim)))
+    edge_linewidth = max(0.3, min(1.0, 8 / max_dim))
 
     # Create color map
     cmap = mcolors.LinearSegmentedColormap.from_list(
@@ -725,14 +771,14 @@ def _plot_feature_heatmaps(network_params, config, save_dir, method_name, title,
             feature_range = 1.0
 
         # Draw the grid using the same approach as plot_qvals
-        for row in range(N):
-            for col in range(N):
+        for row in range(H):
+            for col in range(W):
                 agent_loc = jnp.array([row, col])
                 is_obstacle = basic_env._obstacles_map[row, col] == 1.0
                 is_goal = jnp.array_equal(agent_loc, basic_env.goal_loc)
                 
                 # Use same coordinate transformation as plot_qvals
-                plot_row = N - 1 - row
+                plot_row = H - 1 - row
                 
                 if is_obstacle:
                     # Draw obstacle as grey
@@ -769,9 +815,22 @@ def _plot_feature_heatmaps(network_params, config, save_dir, method_name, title,
                         rect = patches.Rectangle((col, plot_row), 1, 1, linewidth=edge_linewidth, 
                                                 edgecolor='black', facecolor='grey')
                         ax.add_patch(rect)
+                
+                # Add yellow dot in upper right if this state is in a penalty region
+                has_penalty = basic_env._penalty_map[row, col] != 0.0
+                if has_penalty and not is_obstacle and not is_goal:
+                    dot_size = max(10, min(50, 200 / max(1, max_dim)))
+                    ax.scatter(col + 0.85, plot_row + 0.85, s=dot_size, c='yellow', 
+                              edgecolors='black', linewidths=edge_linewidth * 0.5, zorder=10)
+                
+                # Add green 'S' in upper right if this is a start state
+                is_start = any(jnp.array_equal(agent_loc, start_loc) for start_loc in basic_env._start_locs)
+                if is_start and not is_obstacle and not is_goal:
+                    ax.text(col + 0.85, plot_row + 0.85, 'S', ha='center', va='center', 
+                           fontsize=value_fontsize + 2, color='green', weight='bold', zorder=11)
 
-        ax.set_xlim(0, N)
-        ax.set_ylim(0, N)
+        ax.set_xlim(0, W)
+        ax.set_ylim(0, H)
         ax.set_aspect('equal')
         ax.set_xticks([])
         ax.set_yticks([])
@@ -803,14 +862,15 @@ def plot_rep_heatmaps(network_params, config, save_dir):
     )
     
     # Plot last hidden layer heatmaps
-    _plot_feature_heatmaps(
-        network_params, 
-        config, 
-        save_dir, 
-        "get_last_hidden", 
-        "Last Hidden Layer Activations", 
-        f"last_hidden_heatmaps_{config['ENV_NAME']}.png"
-    )
+    if config["ACTIVATION"] != "linear":
+        _plot_feature_heatmaps(
+            network_params, 
+            config, 
+            save_dir, 
+            "get_last_hidden", 
+            "Last Hidden Layer Activations", 
+            f"last_hidden_heatmaps_{config['ENV_NAME']}.png"
+        )
 
 if __name__ == "__main__":
     # ------------------
@@ -983,7 +1043,8 @@ if __name__ == "__main__":
         # Plot Q-values if we run for 1 seed
         if config["N_SEEDS"] == 1:
             plotting_weights = jax.tree_util.tree_map(lambda x: x[0], network_weights) # remove leading seed dimension
-            if config["ENV_NAME"] in ["Maze", "TwoRooms"]:
+            base_env, _ = make(config["ENV_NAME"])
+            if isinstance(base_env, Gridworld):
                 plot_qvals(plotting_weights, config, save_dir)
                 plot_rep_heatmaps(plotting_weights, config, save_dir)
 

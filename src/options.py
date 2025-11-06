@@ -23,6 +23,8 @@ from util.util import load_env_dir
 from util.wrappers import LogWrapper, FlattenObservationWrapper
 import gymnax
 import flashbax as fbx
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 import matplotlib.colors as mcolors
@@ -382,6 +384,8 @@ def plot_qvals(network_params, config, save_dir):
         dataset, 
         n_options
     )
+    stop_cond = jax.jit(stop_cond)
+    get_options_qvals = jax.jit(options_network.apply)
 
     # Store Q-values and stopping info for all agent_location pairs for each option
     q_values_grid = jnp.zeros((n_options, N, N, 4))  # (n_options, N, N, 4 actions)
@@ -409,7 +413,7 @@ def plot_qvals(network_params, config, save_dir):
                 obs_batch = jnp.expand_dims(obs, 0) # Add batch dimension
                 
                 # Forward pass through network for all options
-                q_vals_all_options = options_network.apply(network_params, obs_batch) # (n_options, 1, n_actions)
+                q_vals_all_options = get_options_qvals(network_params, obs_batch) # (n_options, 1, n_actions)
                 q_values_grid = q_values_grid.at[:, row, col].set(q_vals_all_options[:, 0, :])
                 
                 # Get stopping condition for this state
@@ -580,6 +584,7 @@ def plot_stopping_values(network_params, config, save_dir):
         dataset, 
         n_options
     )
+    stop_cond = jax.jit(stop_cond)
 
     # Store stopping values for all agent_location pairs for each option
     stop_val_grid = jnp.zeros((n_options, N, N))  # (n_options, N, N)
@@ -822,6 +827,7 @@ if __name__ == "__main__":
             "CONV1_DIM": hypers.get("conv1_dim", 32),
             "CONV2_DIM": hypers.get("conv2_dim", 16),
             "REP_DIM": hypers.get("rep_dim", 32),
+            "HEAD_HIDDEN_DIM": hypers.get("head_hidden_dim", 64),
             "ACTIVATION": hypers.get("activation", "relu"),
             "USE_LAST_HIDDEN": hypers.get("use_last_hidden", False),
             "STOPPING_CONDITION": hypers.get("stopping_condition", "stomp"),

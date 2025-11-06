@@ -13,3 +13,6 @@ results/
 # Plots
 plots/
 analysis/plots/
+
+# venv
+venv.tar.xz

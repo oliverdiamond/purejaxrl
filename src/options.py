@@ -63,7 +63,7 @@ def make_stopping_condition(config, feature_network, feature_network_params, get
             stop_bonus = jnp.transpose(config["BONUS_WEIGHT"] * obs_features) # (n_features, batch_size)
             stop_val = state_val + stop_bonus
             option_state_val = options_network.apply(params, obs).max(axis=-1)  # (n_features, batch_size)
-            stop = (stop_val > option_state_val).astype(jnp.int32)  # (n_features, batch_size)
+            stop = (stop_val >= option_state_val).astype(jnp.int32)  # (n_features, batch_size)
 
             return stop, stop_val
         
@@ -78,7 +78,7 @@ def make_stopping_condition(config, feature_network, feature_network_params, get
                     ) # (batch_size, n_features)
             stop_val = jnp.transpose(config["BONUS_WEIGHT"] * obs_features) # (n_features, batch_size)
             option_state_vals = options_network.apply(params, obs).max(axis=-1)  # (n_features, batch_size)
-            stop = (stop_val > option_state_vals).astype(jnp.int32)  # (n_features, batch_size)
+            stop = (stop_val >= option_state_vals).astype(jnp.int32)  # (n_features, batch_size)
             return stop, stop_val
 
         return stomp_no_val_stop_cond
@@ -336,9 +336,9 @@ def make_train(config):
                 def print_callback(metrics):
                     if metrics["updates"] % 500 == 0:
                         jax.debug.print(
-                            "updates: {updates}, losses: {losses}",
+                            "updates: {updates}",#, losses: {losses}",
                             updates=metrics["updates"],
-                            losses=metrics["losses"],
+                            #losses=metrics["losses"],
                         )
                 jax.debug.callback(print_callback, metrics)
 
@@ -526,10 +526,9 @@ def plot_qvals(network_params, config, save_dir):
                     
                     # Add white arrows for best action(s)
                     # Round Q-values to thousandths place for comparison
-                    rounded_q_vals = [round(float(q), 3) for q in q_vals]
-                    max_q = max(rounded_q_vals)
-                    best_actions = [i for i, q in enumerate(rounded_q_vals) if q == max_q]
-                    
+                    max_q = max(q_vals)
+                    best_actions = [i for i, q in enumerate(q_vals) if q == max_q]
+
                     # Direction vectors for each action: up, right, down, left
                     directions = [
                         (0, 0.2),   # up
@@ -546,8 +545,8 @@ def plot_qvals(network_params, config, save_dir):
                         dx, dy = directions[action_idx]
                         ax.arrow(col + 0.5, plot_row + 0.5, dx, dy, 
                                 head_width=arrow_head_width, head_length=arrow_head_length, 
-                                fc='white', ec='black', linewidth=edge_linewidth * 0.5, 
-                                zorder=12, length_includes_head=True)
+                                fc='orange', ec='orange', linewidth=edge_linewidth, 
+                                zorder=12, length_includes_head=True, alpha=0.8)
                 
                 # Add yellow dot in upper right if this state is in a penalty region
                 has_penalty = basic_env._penalty_map[row, col] != 0.0

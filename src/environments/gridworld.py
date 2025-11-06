@@ -21,17 +21,20 @@ class EnvParams(environment.EnvParams):
 class Gridworld(environment.Environment[EnvState, EnvParams]):
     def __init__(
         self,
-        N=15,
-        goal_loc=jnp.array([9, 9])
+        H: int,
+        W: int,
+        goal_loc: jax.Array
     ):
         super().__init__()
         self.directions = jnp.array([[-1, 0], [0, 1], [1, 0], [0, -1]])
         self.directions_str = ["up", "right", "down", "left"]
-        self.N = N
+        self.H = H
+        self.W = W
         self.goal_loc = goal_loc
         self._obstacles_map = self._get_obstacles_map()
+        self._penalty_map = self._get_penalty_map()
         self._start_locs = self._get_start_locs()
-        self._rgb_template = self._get_rgb_template()
+        self.goal_reward = 1.0
 
     @property
     def default_params(self) -> EnvParams:
@@ -41,24 +44,16 @@ class Gridworld(environment.Environment[EnvState, EnvParams]):
     def _get_obstacles_map(self) -> jax.Array:
         raise NotImplementedError
 
+    def _get_penalty_map(self) -> jax.Array:
+        """Get map of penalty regions. Default is no penalty regions."""
+        return jnp.zeros([self.H, self.W])
+
     def _get_start_locs(self):
         # Get all valid starting locations (not an obstacle and not the goal)
         valid_locs_mask = self._obstacles_map == 0.0
         valid_locs_mask = valid_locs_mask.at[self.goal_loc[0], self.goal_loc[1]].set(False)
         valid_locs = jnp.argwhere(valid_locs_mask)
         return valid_locs
-
-    def _get_rgb_template(self):
-        # Create a (N, N, 1) boolean mask for obstacles
-        obstacle_mask = jnp.expand_dims(self._obstacles_map, axis=-1)
-
-        # Create templates for wall and empty space colors
-        wall_color = jnp.array([1.0, 0.0, 0.0])
-        empty_color = jnp.array([0.0, 1.0, 0.0])
-
-        # Use jnp.where to select colors based on the obstacle mask
-        rgb_template = jnp.where(obstacle_mask, wall_color, empty_color)
-        return rgb_template
         
     def step_env(
         self,
@@ -69,9 +64,11 @@ class Gridworld(environment.Environment[EnvState, EnvParams]):
     ) -> tuple[jax.Array, EnvState, jax.Array, jax.Array, dict[Any, Any]]:
         """Perform single timestep state transition."""
         # Get new agent location based on action
-        agent_loc_new = jnp.clip(
-            state.agent_loc + self.directions[action], 0, self.N - 1
-        )
+        agent_loc_new = state.agent_loc + self.directions[action]
+        agent_loc_new = jnp.array([
+            jnp.clip(agent_loc_new[0], 0, self.H - 1),
+            jnp.clip(agent_loc_new[1], 0, self.W - 1)
+        ])
         on_obstacle = self._obstacles_map[agent_loc_new[0], agent_loc_new[1]] == 1.0
         agent_loc_new = jax.lax.select(
             on_obstacle, state.agent_loc, agent_loc_new
@@ -82,10 +79,13 @@ class Gridworld(environment.Environment[EnvState, EnvParams]):
             agent_loc=agent_loc_new,
         )
 
-        reward = jnp.asarray(
+        # Calculate reward
+        goal_reward = jnp.asarray(
             jnp.array_equal(state.agent_loc, self.goal_loc),
             dtype=jnp.float32,
-        )
+        ) * self.goal_reward
+        penalty = self._penalty_map[state.agent_loc[0], state.agent_loc[1]]
+        reward = goal_reward + penalty
 
         done = self.is_terminal(state, params)
         truncated = self.is_truncated(state, params)
@@ -138,17 +138,12 @@ class Gridworld(environment.Environment[EnvState, EnvParams]):
         key = None,
     ) -> jax.Array:
         """Return observation from raw state info."""
-        # N x N image with 3 Channels: [Wall, Empty, Agent]
-        obs = self._rgb_template
-        # Set agent location
-        obs = obs.at[state.agent_loc[0], state.agent_loc[1]].set(jnp.array([0.0, 0.0, 1.0]))
-
-        return obs
+        raise NotImplementedError
 
     @property
     def name(self) -> str:
         """Environment name."""
-        return "Gridworld"
+        raise NotImplementedError
 
     @property
     def num_actions(self) -> int:
@@ -161,7 +156,7 @@ class Gridworld(environment.Environment[EnvState, EnvParams]):
 
     def observation_space(self, params: EnvParams) -> spaces.Box:
         """Observation space of the environment."""
-        return spaces.Box(0, 1, (self.N, self.N, 3), jnp.float32)
+        raise NotImplementedError
 
     def state_space(self, params: EnvParams) -> spaces.Dict:
         """State space of the environment."""
@@ -169,7 +164,7 @@ class Gridworld(environment.Environment[EnvState, EnvParams]):
             {
                 "agent_loc": spaces.Box(
                     0,
-                    self.N,
+                    jnp.array([self.H, self.W]),
                     (2,),
                     jnp.float32,
                 ),
@@ -177,12 +172,94 @@ class Gridworld(environment.Environment[EnvState, EnvParams]):
             }
         )
 
-class Maze(Gridworld):
-    def __init__(self):
-        super().__init__()
+class GridworldOneHot(Gridworld):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        # Create mapping from grid positions to valid indices (excluding obstacles and goal)
+        valid_locs_mask = self._obstacles_map == 0.0
+        valid_locs_mask = valid_locs_mask.at[self.goal_loc[0], self.goal_loc[1]].set(False)
+        self._valid_locs = jnp.argwhere(valid_locs_mask)
+        self._num_valid_locs = self._valid_locs.shape[0]
+        
+        # Create a lookup table: position -> index in one-hot encoding
+        # Initialize with -1 (invalid)
+        self._pos_to_idx = jnp.full((self.H, self.W), -1, dtype=jnp.int32)
+        # Fill in valid positions with their indices
+        for i in range(self._num_valid_locs):
+            loc = self._valid_locs[i]
+            self._pos_to_idx = self._pos_to_idx.at[loc[0], loc[1]].set(i)
 
+    def get_obs(
+        self,
+        state: EnvState,
+        params: EnvParams,
+        key = None,
+    ) -> jax.Array:
+        """Return observation from raw state info."""
+        # Get the index of the agent's location in the valid locations
+        agent_idx = self._pos_to_idx[state.agent_loc[0], state.agent_loc[1]]
+        obs = jnp.zeros(self._num_valid_locs)
+        obs = obs.at[agent_idx].set(1.0)
+        
+        return obs
+
+    def observation_space(self, params: EnvParams) -> spaces.Box:
+        """Observation space of the environment."""
+        return spaces.Box(0, 1, (self._num_valid_locs,), jnp.float32)
+
+    @property
+    def name(self) -> str:
+        """Environment name."""
+        raise NotImplementedError
+
+class GridworldRGB(Gridworld):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._rgb_template = self._get_rgb_template()
+
+    def _get_rgb_template(self):
+        # Create a (N, N, 1) boolean mask for obstacles
+        obstacle_mask = jnp.expand_dims(self._obstacles_map, axis=-1)
+
+        # Create templates for wall and empty space colors
+        wall_color = jnp.array([1.0, 0.0, 0.0])
+        empty_color = jnp.array([0.0, 1.0, 0.0])
+
+        # Use jnp.where to select colors based on the obstacle mask
+        rgb_template = jnp.where(obstacle_mask, wall_color, empty_color)
+        return rgb_template
+
+    def get_obs(
+        self,
+        state: EnvState,
+        params: EnvParams,
+        key = None,
+    ) -> jax.Array:
+        """Return observation from raw state info."""
+        # N x N image with 3 Channels: [Wall, Empty, Agent]
+        obs = self._rgb_template
+        # Set agent location
+        obs = obs.at[state.agent_loc[0], state.agent_loc[1]].set(jnp.array([0.0, 0.0, 1.0]))
+
+        return obs
+
+    def observation_space(self, params: EnvParams) -> spaces.Box:
+        """Observation space of the environment."""
+        return spaces.Box(0, 1, (self.H, self.W, 3), jnp.float32)
+
+    @property
+    def name(self) -> str:
+        """Environment name."""
+        raise NotImplementedError
+
+# Mixin classes for different environment layouts
+class MazeMixin:
+    """Mixin for Maze layout."""
+    H: int  # Type hint for mixin - provided by Gridworld base class
+    W: int  # Type hint for mixin - provided by Gridworld base class
+    
     def _get_obstacles_map(self):
-        _map = jnp.zeros([self.N, self.N])
+        _map = jnp.zeros([self.H, self.W])
         _map = _map.at[2, 0:6].set(1.0)
         _map = _map.at[2, 8:].set(1.0)
         _map = _map.at[3, 5].set(1.0)
@@ -205,20 +282,14 @@ class Maze(Gridworld):
         _map = _map.at[14, 5].set(1.0)
         return _map
 
-    @property
-    def name(self) -> str:
-        """Environment name."""
-        return "Maze"
-
-class TwoRooms(Gridworld):
-    def __init__(self):
-        super().__init__(
-            N=5,
-            goal_loc=jnp.array([0, 4])
-        )
-
+class TwoRoomsMixin:
+    """Mixin for TwoRooms layout."""
+    H: int  # Type hint for mixin - provided by Gridworld base class
+    W: int  # Type hint for mixin - provided by Gridworld base class
+    _obstacles_map: jax.Array  # Type hint for mixin - provided by Gridworld base class
+    
     def _get_obstacles_map(self):
-        _map = jnp.zeros([self.N, self.N])
+        _map = jnp.zeros([self.H, self.W])
         _map = _map.at[:2, 2].set(1.0)
         _map = _map.at[3:, 2].set(1.0)
         return _map
@@ -226,11 +297,151 @@ class TwoRooms(Gridworld):
     def _get_start_locs(self):
         # Get all valid starting locations (first room)
         valid_locs_mask = self._obstacles_map == 0.0
+        valid_locs_mask = valid_locs_mask.at[self.goal_loc[0], self.goal_loc[1]].set(False) # type: ignore
         valid_locs_mask = valid_locs_mask.at[:, 2:].set(False)
         valid_locs = jnp.argwhere(valid_locs_mask)
         return valid_locs
 
+class TwoRoomsPaperMixin:
+    """Mixin for TwoRooms layout from STOMP paper."""
+    H: int  # Type hint for mixin - provided by Gridworld base class
+    W: int  # Type hint for mixin - provided by Gridworld base class
+    _obstacles_map: jax.Array  # Type hint for mixin - provided by Gridworld base class
+    
+    def _get_obstacles_map(self):
+        _map = jnp.zeros([self.H, self.W])
+        _map = _map.at[:2, 6].set(1.0)
+        _map = _map.at[3:, 6].set(1.0)
+        return _map
+    
+    def _get_penalty_map(self):
+        _map = jnp.zeros([self.H, self.W])
+        _map = _map.at[:5, 1:5].set(-1.0)
+        return _map
+    
+    def _get_start_locs(self):
+        return jnp.array([[2, 0]])
+
+class RandomTransitionsMixin:
+    """Mixin that adds stochastic transitions (1/3 probability of random action)."""
+    H: int  # Type hint for mixin - provided by Gridworld base class
+    W: int  # Type hint for mixin - provided by Gridworld base class
+    _obstacles_map: jax.Array  # Type hint for mixin - provided by Gridworld base class
+    directions: jax.Array  # Type hint for mixin - provided by Gridworld base class
+    goal_loc: jax.Array  # Type hint for mixin - provided by Gridworld base class
+    _penalty_map: jax.Array  # Type hint for mixin - provided by Gridworld base class
+    goal_reward: float  # Type hint for mixin - provided by Gridworld base class
+    
+    def step_env(
+        self,
+        key: jax.Array,
+        state: EnvState,
+        action: int | float | jax.Array,
+        params: EnvParams,
+    ) -> tuple[jax.Array, EnvState, jax.Array, jax.Array, dict[Any, Any]]:
+        """Perform single timestep state transition with stochastic action selection."""
+        # Split key for randomness
+        key, subkey1, subkey2 = jax.random.split(key, 3)
+        
+        # With probability 1/3, choose a random action different from the selected one
+        should_randomize = jax.random.uniform(subkey1) < (1.0 / 3.0)
+        
+        # Generate a random action index from {0, 1, 2} (excluding the selected action)
+        # We do this by sampling from 0-2 and shifting if >= action
+        random_offset = jax.random.randint(subkey2, (), 0, 3)
+        random_action = jnp.where(random_offset >= action, random_offset + 1, random_offset)
+        
+        # Select actual action: use random_action if should_randomize, else use original action
+        actual_action = jnp.where(should_randomize, random_action, action)
+        
+        # Get new agent location based on actual action
+        agent_loc_new = state.agent_loc + self.directions[actual_action]
+        agent_loc_new = jnp.array([
+            jnp.clip(agent_loc_new[0], 0, self.H - 1),
+            jnp.clip(agent_loc_new[1], 0, self.W - 1)
+        ])
+        on_obstacle = self._obstacles_map[agent_loc_new[0], agent_loc_new[1]] == 1.0
+        agent_loc_new = jax.lax.select(
+            on_obstacle, state.agent_loc, agent_loc_new
+        )
+
+        state = EnvState(
+            time=state.time + 1,
+            agent_loc=agent_loc_new,
+        )
+
+        # Calculate reward
+        goal_reward = jnp.asarray(
+            jnp.array_equal(state.agent_loc, self.goal_loc),
+            dtype=jnp.float32,
+        ) * self.goal_reward
+        penalty = self._penalty_map[state.agent_loc[0], state.agent_loc[1]]
+        reward = goal_reward + penalty
+
+        done = self.is_terminal(state, params)  # type: ignore
+        truncated = self.is_truncated(state, params)  # type: ignore
+
+        return (
+            jax.lax.stop_gradient(self.get_obs(state, params=params)),  # type: ignore
+            jax.lax.stop_gradient(state),
+            reward,
+            done,
+            {"truncated": truncated}
+        )
+
+class MazeRGB(MazeMixin, GridworldRGB):
+    def __init__(self):
+        super().__init__(H=15, W=15, goal_loc=jnp.array([9, 9]))
+
     @property
     def name(self) -> str:
-        """Environment name."""
-        return "TwoRooms"
+        return "MazeRGB"
+
+class MazeOneHot(MazeMixin, GridworldOneHot):
+    def __init__(self):
+        super().__init__(H=15, W=15, goal_loc=jnp.array([9, 9]))
+
+    @property
+    def name(self) -> str:
+        return "MazeOneHot"
+
+class TwoRoomsOneHot(TwoRoomsMixin, GridworldOneHot):
+    def __init__(self):
+        super().__init__(H=5, W=5, goal_loc=jnp.array([0, 4]))
+
+    @property
+    def name(self) -> str:
+        return "TwoRoomsOneHot"
+
+class TwoRoomsRGB(TwoRoomsMixin, GridworldRGB):
+    def __init__(self):
+        super().__init__(H=5, W=5, goal_loc=jnp.array([0, 4]))
+
+    @property
+    def name(self) -> str:
+        return "TwoRoomsRGB"
+    
+class TwoRoomsPaperOneHot(TwoRoomsPaperMixin, GridworldOneHot):
+    def __init__(self):
+        super().__init__(H=6, W=13, goal_loc=jnp.array([5, 9]))
+
+    @property
+    def name(self) -> str:
+        return "TwoRoomsPaperOneHot"
+
+
+class TwoRoomsPaperRGB(TwoRoomsPaperMixin, GridworldRGB):
+    def __init__(self):
+        super().__init__(H=6, W=13, goal_loc=jnp.array([5, 9]))
+
+    @property
+    def name(self) -> str:
+        return "TwoRoomsPaperRGB"
+    
+class TwoRoomsPaperRandom(RandomTransitionsMixin, TwoRoomsPaperMixin, GridworldOneHot):
+    def __init__(self):
+        super().__init__(H=6, W=13, goal_loc=jnp.array([5, 9]))
+
+    @property
+    def name(self) -> str:
+        return "TwoRoomsPaperRandom"

@@ -63,7 +63,7 @@ class TestFTA:
     def test_output_range(self):
         """Test that output values are in [0, 1] range."""
         x = jnp.linspace(-40, 40, 100)
-        result = fta(x)
+        result = fta(x, eta=1.0)
         assert jnp.all(result >= 0) and jnp.all(result <= 1)
     
     def test_different_eta_values(self):
@@ -139,7 +139,7 @@ class TestFTA:
         x = jnp.linspace(-10, 10, batch_size)
         tiles = 20
         
-        result = fta(x, tiles=tiles)
+        result = fta(x, tiles=tiles, eta=1.0)
         
         assert result.shape == (batch_size, tiles)
         assert jnp.all(result >= 0) and jnp.all(result <= 1)

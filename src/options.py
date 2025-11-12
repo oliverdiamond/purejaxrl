@@ -39,6 +39,23 @@ from dqn import QNet, QNetFTA, QNetLinear
 
 def make_stopping_condition(config, feature_network, feature_network_params, get_features, options_network, dataset, n_options):
     #TODO Determine if feature should be maximized or minimized based on the sign of the derivative (so we can do "avoidance" for features with negative outgoing weights)
+    if "replacement" in config["STOPPING_CONDITION"]:
+        assert config["USE_LAST_HIDDEN"] == True, "replacement stopping val needs features to be from last hidden layer"
+        feature_net_params_batched = jax.tree_util.tree_map(
+            lambda arr: jnp.stack([arr] * n_options),
+            feature_network_params
+        )
+        feature_idxs = jnp.arange(n_options)
+        feature_net_params_batched = unfreeze(feature_net_params_batched)
+        new_output_weights = feature_net_params_batched['params']['output']['kernel'].at[feature_idxs, feature_idxs, :].set(config["BONUS_WEIGHT"])
+        feature_net_params_batched['params']['output']['kernel'] = new_output_weights
+        feature_net_params_batched = freeze(feature_net_params_batched)
+        vmap_feature_net_apply = jax.vmap(
+                lambda params, inputs: feature_network.apply(params, inputs),
+                in_axes=(0, None)
+            )
+        get_action_vals_with_bonus = lambda obs: vmap_feature_net_apply(feature_net_params_batched, obs)  # (n_features, batch_size, n_actions)
+        
     if "percentile" in config["STOPPING_CONDITION"]:
         dataset_features = feature_network.apply(
             feature_network_params, 
@@ -50,9 +67,21 @@ def make_stopping_condition(config, feature_network, feature_network_params, get
             config["STOPPING_PERCENTILE"], 
             axis=0
         ) # (n_features,)
-    
-    if config["STOPPING_CONDITION"] == "stomp":
-        def stomp_stop_cond(obs, params):
+
+    if config["STOPPING_CONDITION"] == "stomp_replacement":
+        def stomp_replacement_stop_cond(obs, params):
+            greedy_action_idxs = feature_network.apply(feature_network_params, obs).argmax(axis=-1)  # (batch_size,)
+            action_vals_with_bonus = get_action_vals_with_bonus(obs)  # (n_features, batch_size, n_actions)
+            state_vals_with_bonus = action_vals_with_bonus[:, jnp.arange(obs.shape[0]), greedy_action_idxs]  # (n_features, batch_size)
+            option_state_vals = options_network.apply(params, obs).max(axis=-1)  # (n_features, batch_size)
+            stop = (state_vals_with_bonus >= option_state_vals).astype(jnp.int32)  # (n_features, batch_size)
+
+            return stop, state_vals_with_bonus
+        
+        return stomp_replacement_stop_cond
+
+    if config["STOPPING_CONDITION"] == "stomp_addition":
+        def stomp_addition_stop_cond(obs, params):
             obs_features = feature_network.apply(
                         feature_network_params, 
                         obs,
@@ -67,7 +96,7 @@ def make_stopping_condition(config, feature_network, feature_network_params, get
 
             return stop, stop_val
         
-        return stomp_stop_cond
+        return stomp_addition_stop_cond
 
     elif config["STOPPING_CONDITION"] == "stomp_no_val":
         def stomp_no_val_stop_cond(obs, params):
@@ -83,9 +112,24 @@ def make_stopping_condition(config, feature_network, feature_network_params, get
 
         return stomp_no_val_stop_cond
 
-    elif config["STOPPING_CONDITION"] == "percentile":
-        assert config["USE_LAST_HIDDEN"] == True, "value-based stopping val needs features to be from last hidden layer"
-        def percentile_stop_cond(obs, params=None):
+    if config["STOPPING_CONDITION"] == "percentile_replacement":
+        def percentile_replacement_stop_cond(obs, params=None):
+            obs_features = feature_network.apply(
+                        feature_network_params, 
+                        obs,
+                        method=get_features
+                    ) # (batch_size, n_features)
+            stop = jnp.transpose(obs_features >= percentile).astype(jnp.int32)  # (n_features, batch_size)
+            greedy_action_idxs = feature_network.apply(feature_network_params, obs).argmax(axis=-1)  # (batch_size,)
+            action_vals_with_bonus = get_action_vals_with_bonus(obs)  # (n_features, batch_size, n_actions)
+            state_vals_with_bonus = action_vals_with_bonus[:, jnp.arange(obs.shape[0]), greedy_action_idxs]  # (n_features, batch_size)
+
+            return stop, state_vals_with_bonus
+        
+        return percentile_replacement_stop_cond
+
+    elif config["STOPPING_CONDITION"] == "percentile_addition":
+        def percentile_addition_stop_cond(obs, params=None):
             obs_features = feature_network.apply(
                         feature_network_params, 
                         obs,
@@ -99,7 +143,7 @@ def make_stopping_condition(config, feature_network, feature_network_params, get
 
             return stop, stop_val
         
-        return percentile_stop_cond
+        return percentile_addition_stop_cond
 
 
     elif config["STOPPING_CONDITION"] == "percentile_no_val":
@@ -118,8 +162,7 @@ def make_stopping_condition(config, feature_network, feature_network_params, get
         return percentile_no_val_stop_cond
     
     elif config["STOPPING_CONDITION"] == "percentile_val_only":
-        assert config["USE_LAST_HIDDEN"] == True, "value-based stopping val needs features to be from last hidden layer"
-        def percentile_stop_cond(obs, params=None):
+        def percentile_val_only_stop_cond(obs, params=None):
             obs_features = feature_network.apply(
                         feature_network_params, 
                         obs,
@@ -130,7 +173,7 @@ def make_stopping_condition(config, feature_network, feature_network_params, get
             state_val = jnp.tile(state_val, (n_options, 1))  # (n_features, batch_size)
             return stop, state_val
         
-        return percentile_stop_cond
+        return percentile_val_only_stop_cond
     else:
         raise ValueError(f"Unknown stopping condition: {config['STOPPING_CONDITION']}")
     

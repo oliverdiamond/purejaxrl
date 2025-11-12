@@ -14,6 +14,6 @@
         "activation": "linear",
         "use_last_hidden": true,
         "stopping_condition": ["stomp"],
-        "bonus_weight": [0.05]
+        "bonus_weight": [1]
     }
 }

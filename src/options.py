@@ -68,6 +68,16 @@ def make_stopping_condition(config, feature_network, feature_network_params, get
             axis=0
         ) # (n_features,)
 
+    if "zscore" in config["STOPPING_CONDITION"]:
+        dataset_features = feature_network.apply(
+            feature_network_params, 
+            dataset["obs"],
+            method=get_features
+        ) # (dataset_size, n_features)
+        feature_mean = jnp.mean(dataset_features, axis=0)  # (n_features,)
+        feature_std = jnp.std(dataset_features, axis=0)  # (n_features,)
+        zscore_threshold = feature_mean + 2.0 * feature_std  # (n_features,)
+
     if config["STOPPING_CONDITION"] == "stomp_replacement":
         def stomp_replacement_stop_cond(obs, params):
             greedy_action_idxs = feature_network.apply(feature_network_params, obs).argmax(axis=-1)  # (batch_size,)
@@ -174,6 +184,68 @@ def make_stopping_condition(config, feature_network, feature_network_params, get
             return stop, state_val
         
         return percentile_val_only_stop_cond
+
+    elif config["STOPPING_CONDITION"] == "zscore_replacement":
+        def zscore_replacement_stop_cond(obs, params=None):
+            obs_features = feature_network.apply(
+                        feature_network_params, 
+                        obs,
+                        method=get_features
+                    ) # (batch_size, n_features)
+            stop = jnp.transpose(obs_features >= zscore_threshold).astype(jnp.int32)  # (n_features, batch_size)
+            greedy_action_idxs = feature_network.apply(feature_network_params, obs).argmax(axis=-1)  # (batch_size,)
+            action_vals_with_bonus = get_action_vals_with_bonus(obs)  # (n_features, batch_size, n_actions)
+            state_vals_with_bonus = action_vals_with_bonus[:, jnp.arange(obs.shape[0]), greedy_action_idxs]  # (n_features, batch_size)
+
+            return stop, state_vals_with_bonus
+        
+        return zscore_replacement_stop_cond
+
+    elif config["STOPPING_CONDITION"] == "zscore_addition":
+        def zscore_addition_stop_cond(obs, params=None):
+            obs_features = feature_network.apply(
+                        feature_network_params, 
+                        obs,
+                        method=get_features
+                    ) # (batch_size, n_features)
+            stop = jnp.transpose(obs_features >= zscore_threshold).astype(jnp.int32)  # (n_features, batch_size)
+            state_val = feature_network.apply(feature_network_params, obs).max(axis=-1)  # (batch_size,)
+            state_val = jnp.tile(state_val, (n_options, 1))  # (n_features, batch_size)
+            stop_bonus = jnp.transpose(config["BONUS_WEIGHT"] * obs_features) # (n_features, batch_size)
+            stop_val = state_val + stop_bonus
+
+            return stop, stop_val
+        
+        return zscore_addition_stop_cond
+
+    elif config["STOPPING_CONDITION"] == "zscore_no_val":
+        def zscore_no_val_stop_cond(obs, params=None):
+            obs_features = feature_network.apply(
+                        feature_network_params, 
+                        obs,
+                        method=get_features
+                    ) # (batch_size, n_features)
+            stop_bonus = jnp.transpose(config["BONUS_WEIGHT"] * obs_features) # (n_features, batch_size)
+            stop = jnp.transpose(obs_features >= zscore_threshold).astype(jnp.int32)  # (n_features, batch_size)
+            
+            return stop, stop_bonus
+
+        return zscore_no_val_stop_cond
+    
+    elif config["STOPPING_CONDITION"] == "zscore_val_only":
+        def zscore_val_only_stop_cond(obs, params=None):
+            obs_features = feature_network.apply(
+                        feature_network_params, 
+                        obs,
+                        method=get_features
+                    ) # (batch_size, n_features)
+            stop = jnp.transpose(obs_features >= zscore_threshold).astype(jnp.int32)  # (n_features, batch_size)
+            state_val = feature_network.apply(feature_network_params, obs).max(axis=-1)  # (batch_size,)
+            state_val = jnp.tile(state_val, (n_options, 1))  # (n_features, batch_size)
+            return stop, state_val
+        
+        return zscore_val_only_stop_cond
+    
     else:
         raise ValueError(f"Unknown stopping condition: {config['STOPPING_CONDITION']}")
     

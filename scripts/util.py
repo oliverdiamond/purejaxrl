@@ -17,6 +17,9 @@ def write_finished_indices(exp, fpath, unfinished_indices):
         params_dict[ind] = exp.getPermutation(ind)
         finished_idxs.add(ind)
 
+    # Create parent directory if it doesn't exist
+    os.makedirs(os.path.dirname(fpath), exist_ok=True)
+
     # Save completed indices and params
     lock = fl.FileLock(fpath + ".lock")
     with lock:
@@ -25,6 +28,9 @@ def write_finished_indices(exp, fpath, unfinished_indices):
 
 
 def load_unfinished_indices(exp, fpath):
+    # Create parent directory if it doesn't exist
+    os.makedirs(os.path.dirname(fpath), exist_ok=True)
+    
     lock = fl.FileLock(fpath + ".lock")
     # Open and load `finished_indices.pkl`
     indices_completed = set()

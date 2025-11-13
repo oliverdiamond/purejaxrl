@@ -41,13 +41,6 @@ parser.add_argument(
     ),
 )
 parser.add_argument(
-    "--cpu-venv",
-    action="store_true",
-    default=False,
-    help="If local-venv is false, use the virtual environment located in ./venv_cpu.tar.xz " 
-    +"otherwise use the virtual environment with jax[cuda12] located in ./venv.tar.xz",
-)
-parser.add_argument(
     "--history-file",
     type=str,
     required=False,
@@ -64,7 +57,19 @@ parser.add_argument(
     "-L",
     "--local-venv",
     action="store_true",
-    help="use the local virtual environment located in ./.venv/",
+    help="use a local virtual environment",
+)
+parser.add_argument(
+    "--local-venv-name",
+    type=str,
+    default=".venv",
+    help="name of the local venv directory to use when --local-venv is set (default: ./.venv/)",
+)
+parser.add_argument(
+    "--zipped-venv-name",
+    type=str,
+    default="venv.tar.xz",
+    help="name of the zipped venv file to use when --local-venv is not set (default: venv.tar.xz)",
 )
 parser.add_argument(
     "--cluster", type=str, required=True, help="config for slurm job options"
@@ -200,14 +205,11 @@ venv: str
 venv_origin: str
 
 if not cmdline.local_venv:
-    if cmdline.cpu_venv:
-        venv_origin = f"{cwd}/venv_cpu.tar.xz"
-    else:
-        venv_origin = f"{cwd}/venv.tar.xz"
+    venv_origin = f"{cwd}/{cmdline.zipped_venv_name}"
     venv = "$SLURM_TMPDIR"
 else:
     venv = "."
-    venv_origin = ".venv"
+    venv_origin = cmdline.local_venv_name
 
 
 def get_xla_python_client_preallocate(options: argparse.Namespace) -> str:
@@ -429,6 +431,8 @@ module load cudacore/.12.2.2
 module load cudnn/9.2.1.18
 module load cuda/12.2
 module load mujoco/3.1.6
+module load cmake 
+module load opencv
         """
 
         gpu_mps = """mkdir -p $HOME/tmp
@@ -689,9 +693,10 @@ def schedule_indicies(path, indicies, sub):
     print("scheduling:", path, indicies)
     # build the executable string instead of activating the venv every
     # time, just use its python directly
+    venv_name = cmdline.local_venv_name if cmdline.local_venv else ".venv"
     runner = " ".join(
         [
-            f"{venv}/.venv/bin/python",
+            f"{venv}/{venv_name}/bin/python",
             f"{cmdline.entry}",
             "--gpu" if cmdline.gpu else "--no-gpu",
             f"-e {path}",

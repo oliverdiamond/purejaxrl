@@ -1,12 +1,13 @@
 matplotlib
 pandas
-jax==0.4.28
-jaxlib==0.4.28
+jax
+jaxlib
 jaxtyping>=0.2.34
 gymnax
 distrax
 optax
-flax==0.10.4
+flax
+brax
 numpy
 navix
 flashbax

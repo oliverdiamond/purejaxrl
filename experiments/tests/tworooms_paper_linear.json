@@ -3,7 +3,7 @@
     "save_weights": true,
     "wandb_mode": "disabled",
     "metaParameters": {
-        "total_timesteps": 150000,
+        "total_timesteps": 200000,
         "opt": "sgd",
         "learning_rate": 1,
         "epsilon_start": 1.0,

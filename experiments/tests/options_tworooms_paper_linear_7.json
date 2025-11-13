@@ -12,7 +12,7 @@
         "n_seeds": 1,
         "env_name": "TwoRoomsPaperOneHot",
         "activation": "linear",
-        "use_last_hidden": false,
+        "use_last_hidden": true,
         "stopping_condition": [
             "stomp_replacement",
             "stomp_addition", 

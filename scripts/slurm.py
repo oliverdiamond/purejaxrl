@@ -430,9 +430,6 @@ module load gcc/12.3
 module load cudacore/.12.2.2
 module load cudnn/9.2.1.18
 module load cuda/12.2
-module load mujoco/3.1.6
-module load cmake 
-module load opencv
         """
 
         gpu_mps = """mkdir -p $HOME/tmp

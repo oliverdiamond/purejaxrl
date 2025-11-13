@@ -7,7 +7,6 @@ gymnax
 distrax
 optax
 flax
-brax
 numpy
 navix
 flashbax

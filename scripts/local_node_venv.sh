@@ -4,7 +4,6 @@
 #SBATCH --account=aip-amw8
 
 module load "python/$PY_VERSION" rust
-module load mujoco
 
 # Check for arguments and set requirements file and tar file accordingly
 requirements_file="requirements_cc.txt"
@@ -14,7 +13,6 @@ cp $path/$requirements_file $SLURM_TMPDIR/
 cd $SLURM_TMPDIR
 python -m venv .venv
 source .venv/bin/activate
-pip install brax --no-index
 pip install -r $requirements_file
 
 # TODO: for some reason, pip cannot install any of the current wheels for this package.

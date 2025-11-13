@@ -19,6 +19,7 @@ python -m venv .venv
 source .venv/bin/activate
 pip install -r $requirements_file
 pip install brax --no-index # This is nessesary when using the CC mujoco module
+pip install envpool==0.8.4
 
 
 # TODO: for some reason, pip cannot install any of the current wheels for this package.

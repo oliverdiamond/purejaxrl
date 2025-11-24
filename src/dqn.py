@@ -299,7 +299,7 @@ def make_train(config):
     config["NUM_UPDATES"] = config["TOTAL_TIMESTEPS"] // config["NUM_ENVS"]
 
     base_env, env_params = make(config["ENV_NAME"])
-    env = LogWrapper(base_env)
+    env = LogWrapper(base_env, gamma=config["GAMMA"])
 
     vmap_reset = lambda n_envs: lambda rng: jax.vmap(env.reset, in_axes=(0, None))(
         jax.random.split(rng, n_envs), env_params
@@ -474,39 +474,64 @@ def make_train(config):
                 operand=train_state,
             )
 
-            metrics = {
-                "timesteps": train_state.timesteps,
-                "updates": train_state.n_updates,
-                "loss": loss.mean(),
-                "discounted_returns": info["returned_episode_discounted_returns"].mean(),
-                "undiscounted_returns": info["returned_episode_returns"].mean(),
+            metric = {
+                "reward_sum": info["reward_sum"],
+                "discounted_reward_sum": info["discounted_reward_sum"],
+                "timestep": info["timestep"],
+                "episode_step": info["episode_step"],
+                "done": info["done"],
+                "loss": loss,
             }
 
             # report on wandb if required
-            if hypers.get("wandb_mode", False) == "online":
+            if params.get("wandb_mode", False) == "online" and config["N_SEEDS"] == 1:
+                def wandb_callback(metric):
+                    wandb.log(
+                        {
+                        "reward_sum": metric["reward_sum"][0],
+                        "discounted_reward_sum": metric["discounted_reward_sum"][0],
+                        "timestep": metric["timestep"][0],
+                        "episode_step": metric["episode_step"][0],
+                        "loss": metric["loss"][0],
+                        "done": metric["done"][0],
+                        }
+                    )
+                jax.lax.cond(
+                    metric["done"][0],
+                    lambda metric: jax.debug.callback(wandb_callback, metric),
+                    lambda metric: None,
+                    metric,
+                )
 
-                def callback(metrics):
-                    if metrics["timesteps"] % 100 == 0:
-                        wandb.log(metrics)
+            if config.get("VERBOSE"):
 
-                jax.debug.callback(callback, metrics)
+                def callback(info):
+                    returns = info["reward_sum"][
+                        info["done"]
+                    ]
+                    steps = info["episode_step"][
+                        info["done"]
+                    ]
+                    timesteps = info["timestep"][info["done"]]
+                    loss = info["loss"][info["done"]]
 
-            if config['VERBOSE'] == True:
-                def print_callback(metrics):
-                    if metrics["timesteps"] % 500 == 0:
-                        jax.debug.print(
-                            "timesteps: {timesteps}, updates: {updates}, loss: {loss:.4f}, undiscounted_returns: {undiscounted_returns:.4f}, discounted_returns: {discounted_returns:.4f}",
-                            timesteps=metrics["timesteps"],
-                            updates=metrics["updates"],
-                            loss=metrics["loss"],
-                            undiscounted_returns=metrics["undiscounted_returns"],
-                            discounted_returns=metrics["discounted_returns"],
+                    for t in range(len(timesteps)):
+                        print(
+                            " ".join(
+                                [
+                                    f"global step={timesteps[t]},",
+                                    f"return={returns[t]}",
+                                    f"episode_step={steps[t]}",
+                                    f"loss={loss[t]:.4f}",
+                                ]
+                            )
                         )
-                jax.debug.callback(print_callback, metrics)
+
+                jax.debug.callback(callback, metric)
 
             runner_state = (train_state, buffer_state, env_state, obs, rng)
 
-            return runner_state, metrics
+            return runner_state, metric
 
         # train
         rng, _rng = jax.random.split(rng)
@@ -1028,14 +1053,11 @@ if __name__ == "__main__":
         metrics = jax.device_get(results["metrics"])
 
         # save standard metrics into the per-run directory
-        returns = metrics["discounted_returns"]
-        jnp.save(os.path.join(save_dir, "returns.npy"), returns)
-        del returns  # Free memory after saving
-
-        loss = metrics["loss"]
-        jnp.save(os.path.join(save_dir, "loss.npy"), loss)
-        del loss  # Free memory after saving
-
+        metrics = results["metrics"]
+        for metric in metrics:
+            metric_data = metrics[metric]
+            jnp.save(os.path.join(save_dir, f"{metric}.npy"), metric_data)
+            del metric_data  # Free memory after saving
 
         train_state = results["runner_state"][0]
         network_weights = train_state.params

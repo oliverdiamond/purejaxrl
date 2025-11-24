@@ -37,30 +37,39 @@ from util.fta import fta
 from experiment import experiment_model
 from dqn import QNet, QNetFTA, QNetLinear
 
-def make_stopping_condition(config, feature_network, feature_network_params, get_features, options_network, dataset, n_options):
+def make_stopping_condition(
+    config, 
+    feature_network, 
+    main_network, 
+    feature_network_params, 
+    main_network_params, 
+    get_features, 
+    options_network, 
+    dataset, 
+    n_options,
+    feature_idxs
+    ):
     #TODO Determine if feature should be maximized or minimized based on the sign of the derivative (so we can do "avoidance" for features with negative outgoing weights)
     if "replacement" in config["STOPPING_CONDITION"]:
         assert config["USE_LAST_HIDDEN"] == True, "replacement stopping val needs features to be from last hidden layer"
-        feature_net_params_batched = jax.tree_util.tree_map(
+        main_net_params_batched = jax.tree_util.tree_map(
             lambda arr: jnp.stack([arr] * n_options),
-            feature_network_params
+            main_network_params
         )
-        feature_idxs = jnp.arange(n_options)
-        feature_net_params_batched = unfreeze(feature_net_params_batched)
-        new_output_weights = feature_net_params_batched['params']['output']['kernel'].at[feature_idxs, feature_idxs, :].set(config["BONUS_WEIGHT"])
-        feature_net_params_batched['params']['output']['kernel'] = new_output_weights
-        feature_net_params_batched = freeze(feature_net_params_batched)
-        vmap_feature_net_apply = jax.vmap(
-                lambda params, inputs: feature_network.apply(params, inputs),
+        main_net_params_batched = unfreeze(main_net_params_batched)
+        new_output_weights = main_net_params_batched['params']['output']['kernel'].at[jnp.arange(n_options), feature_idxs, :].set(config["BONUS_WEIGHT"])
+        main_net_params_batched['params']['output']['kernel'] = new_output_weights
+        main_net_params_batched = freeze(main_net_params_batched)
+        vmap_main_net_apply = jax.vmap(
+                lambda params, inputs: main_network.apply(params, inputs),
                 in_axes=(0, None)
             )
-        get_action_vals_with_bonus = lambda obs: vmap_feature_net_apply(feature_net_params_batched, obs)  # (n_features, batch_size, n_actions)
+        get_action_vals_with_bonus = lambda obs: vmap_main_net_apply(main_net_params_batched, obs)  # (n_features, batch_size, n_actions)
         
     if "percentile" in config["STOPPING_CONDITION"]:
-        dataset_features = feature_network.apply(
+        dataset_features = get_features(
             feature_network_params, 
-            dataset["obs"],
-            method=get_features
+            dataset["obs"]
         ) # (dataset_size, n_features)
         percentile = jnp.percentile(
             dataset_features, 
@@ -69,10 +78,9 @@ def make_stopping_condition(config, feature_network, feature_network_params, get
         ) # (n_features,)
 
     if "zscore" in config["STOPPING_CONDITION"]:
-        dataset_features = feature_network.apply(
+        dataset_features = get_features(
             feature_network_params, 
-            dataset["obs"],
-            method=get_features
+            dataset["obs"]
         ) # (dataset_size, n_features)
         feature_mean = jnp.mean(dataset_features, axis=0)  # (n_features,)
         feature_std = jnp.std(dataset_features, axis=0)  # (n_features,)
@@ -80,7 +88,7 @@ def make_stopping_condition(config, feature_network, feature_network_params, get
 
     if config["STOPPING_CONDITION"] == "stomp_replacement":
         def stomp_replacement_stop_cond(obs, params):
-            greedy_action_idxs = feature_network.apply(feature_network_params, obs).argmax(axis=-1)  # (batch_size,)
+            greedy_action_idxs = main_network.apply(main_network_params, obs).argmax(axis=-1)  # (batch_size,)
             action_vals_with_bonus = get_action_vals_with_bonus(obs)  # (n_features, batch_size, n_actions)
             state_vals_with_bonus = action_vals_with_bonus[:, jnp.arange(obs.shape[0]), greedy_action_idxs]  # (n_features, batch_size)
             option_state_vals = options_network.apply(params, obs).max(axis=-1)  # (n_features, batch_size)
@@ -92,12 +100,8 @@ def make_stopping_condition(config, feature_network, feature_network_params, get
 
     if config["STOPPING_CONDITION"] == "stomp_addition":
         def stomp_addition_stop_cond(obs, params):
-            obs_features = feature_network.apply(
-                        feature_network_params, 
-                        obs,
-                        method=get_features
-                    ) # (batch_size, n_features)
-            state_val = feature_network.apply(feature_network_params, obs).max(axis=-1)  # (batch_size,)
+            obs_features = get_features(feature_network_params, obs) # (batch_size, n_features)
+            state_val = main_network.apply(main_network_params, obs).max(axis=-1)  # (batch_size,)
             state_val = jnp.tile(state_val, (n_options, 1))  # (n_features, batch_size)
             stop_bonus = jnp.transpose(config["BONUS_WEIGHT"] * obs_features) # (n_features, batch_size)
             stop_val = state_val + stop_bonus
@@ -110,11 +114,7 @@ def make_stopping_condition(config, feature_network, feature_network_params, get
 
     elif config["STOPPING_CONDITION"] == "stomp_no_val":
         def stomp_no_val_stop_cond(obs, params):
-            obs_features = feature_network.apply(
-                        feature_network_params, 
-                        obs,
-                        method=get_features
-                    ) # (batch_size, n_features)
+            obs_features = get_features(feature_network_params, obs) # (batch_size, n_features)
             stop_val = jnp.transpose(config["BONUS_WEIGHT"] * obs_features) # (n_features, batch_size)
             option_state_vals = options_network.apply(params, obs).max(axis=-1)  # (n_features, batch_size)
             stop = (stop_val >= option_state_vals).astype(jnp.int32)  # (n_features, batch_size)
@@ -124,29 +124,21 @@ def make_stopping_condition(config, feature_network, feature_network_params, get
 
     if config["STOPPING_CONDITION"] == "percentile_replacement":
         def percentile_replacement_stop_cond(obs, params=None):
-            obs_features = feature_network.apply(
-                        feature_network_params, 
-                        obs,
-                        method=get_features
-                    ) # (batch_size, n_features)
+            obs_features = get_features(feature_network_params, obs) # (batch_size, n_features)
             stop = jnp.transpose(obs_features >= percentile).astype(jnp.int32)  # (n_features, batch_size)
-            greedy_action_idxs = feature_network.apply(feature_network_params, obs).argmax(axis=-1)  # (batch_size,)
+            greedy_action_idxs = main_network.apply(main_network_params, obs).argmax(axis=-1)  # (batch_size,)
             action_vals_with_bonus = get_action_vals_with_bonus(obs)  # (n_features, batch_size, n_actions)
             state_vals_with_bonus = action_vals_with_bonus[:, jnp.arange(obs.shape[0]), greedy_action_idxs]  # (n_features, batch_size)
-
+            
             return stop, state_vals_with_bonus
         
         return percentile_replacement_stop_cond
 
     elif config["STOPPING_CONDITION"] == "percentile_addition":
         def percentile_addition_stop_cond(obs, params=None):
-            obs_features = feature_network.apply(
-                        feature_network_params, 
-                        obs,
-                        method=get_features
-                    ) # (batch_size, n_features)
+            obs_features = get_features(feature_network_params, obs) # (batch_size, n_features)
             stop = jnp.transpose(obs_features >= percentile).astype(jnp.int32)  # (n_features, batch_size)
-            state_val = feature_network.apply(feature_network_params, obs).max(axis=-1)  # (batch_size,)
+            state_val = main_network.apply(main_network_params, obs).max(axis=-1)  # (batch_size,)
             state_val = jnp.tile(state_val, (n_options, 1))  # (n_features, batch_size)
             stop_bonus = jnp.transpose(config["BONUS_WEIGHT"] * obs_features) # (n_features, batch_size)
             stop_val = state_val + stop_bonus
@@ -282,9 +274,9 @@ def make_options_network(config, action_dim, n_options):
     
 def make_feature_network(config, action_dim):
     """Returns the appropriate network based on the configuration."""
-    feature_net_agent = config["FEATURE_PARAMS"]["agent"].lower()
+    feature_net_type = config["FEATURE_PARAMS"]["agent"].lower()
     feature_net_hypers = config["FEATURE_PARAMS"]["metaParameters"]
-    if feature_net_agent == "dqn":
+    if feature_net_type == "dqn":
         if feature_net_hypers["activation"] == "relu":
             return QNet(
                 action_dim=action_dim,
@@ -310,7 +302,39 @@ def make_feature_network(config, action_dim):
                 action_dim=action_dim
             )
     else:
-        raise ValueError(f"Unknown feature network: {feature_net_agent}")
+        raise ValueError(f"Unknown feature network: {feature_net_type}")
+
+def make_main_network(config, action_dim):
+    """Returns the appropriate network based on the configuration."""
+    main_net_type = config["MAIN_PARAMS"]["agent"].lower()
+    main_net_hypers = config["MAIN_PARAMS"]["metaParameters"]
+    if main_net_type == "dqn":
+        if main_net_hypers["activation"] == "relu":
+            return QNet(
+                action_dim=action_dim,
+                conv1_dim=main_net_hypers.get("conv1_dim", 32),
+                conv2_dim=main_net_hypers.get("conv2_dim", 16),
+                rep_dim=main_net_hypers.get("rep_dim", 32),
+                head_hidden_dim=main_net_hypers.get("head_hidden_dim", 64)
+            )
+        elif main_net_hypers["activation"] == "fta":
+            return QNetFTA(
+                action_dim=action_dim,
+                conv1_dim=main_net_hypers.get('conv1_dim', 32),
+                conv2_dim=main_net_hypers.get('conv2_dim', 16),
+                rep_dim=main_net_hypers.get('rep_dim', 32),
+                head_hidden_dim=main_net_hypers.get("head_hidden_dim", 64),
+                fta_eta=main_net_hypers.get('fta_eta', 2),
+                fta_tiles=main_net_hypers.get("fta_tiles", 20),
+                fta_lower_bound=main_net_hypers.get("fta_lower_bound", -20.0),
+                fta_upper_bound=main_net_hypers.get("fta_upper_bound", 20.0),
+            )        
+        elif main_net_hypers["activation"] == "linear":
+            return QNetLinear(
+                action_dim=action_dim
+            )
+    else:
+        raise ValueError(f"Unknown feature network: {main_net_type}")
 
 
 
@@ -319,7 +343,7 @@ class CustomTrainState(TrainState):
     n_updates: int
 
 def make_train(config):
-    def train(feature_net_params, dataset, rng):
+    def train(feature_net_params, main_net_params, dataset, rng):
         # FEATURE NETWORK
         if config["IMG_OBS"]:
             init_x = jnp.zeros((1,) + config["OBS_SHAPE"])  # Conv layers need extra dimension for batch size
@@ -327,20 +351,35 @@ def make_train(config):
             init_x = jnp.zeros(config["OBS_SHAPE"])
 
         feature_network = make_feature_network(config, action_dim=config["ACTION_DIM"])
+        main_network = make_main_network(config, action_dim=config["ACTION_DIM"])
 
         if config['USE_LAST_HIDDEN']:
-            get_features = feature_network.get_last_hidden # type: ignore
+            get_all_features = feature_network.get_last_hidden # type: ignore
         else:
-            get_features = feature_network.get_features # type: ignore
+            get_all_features = feature_network.get_features # type: ignore
 
-        _features = feature_network.apply( # type: ignore
+        _all_features = feature_network.apply( # type: ignore
             feature_net_params,
             init_x,
-            method=get_features, # type: ignore
+            method=get_all_features, # type: ignore
         )
+
+        if config['FEATURE_IDXS'] is not None:
+            feature_idxs = jnp.array(config['FEATURE_IDXS'])
+        else:
+            feature_idxs = jnp.arange(_all_features.shape[-1]) # type: ignore
+            
+        get_features = lambda params, x: feature_network.apply( # type: ignore
+            params,
+            x,
+            method=get_all_features, # type: ignore
+        )[:, feature_idxs]  # type: ignore
+            
+        _features = get_features(feature_net_params, init_x)
+
         n_options = _features.shape[-1] # type: ignore
 
-        # OPTIONS NETWORK (seperate ff for each option for now)
+        # OPTIONS NETWORK (seperate ff net for each option for now)
         options_network = make_options_network(
             config, 
             action_dim=config["ACTION_DIM"], 
@@ -353,11 +392,14 @@ def make_train(config):
         stop_cond = make_stopping_condition(
             config, 
             feature_network, 
+            main_network,
             feature_net_params, 
+            main_net_params,
             get_features, 
             options_network,
             dataset, 
-            n_options
+            n_options,
+            feature_idxs
         )
 
         def linear_schedule(count):
@@ -496,7 +538,7 @@ def plot_qvals(network_params, config, save_dir):
     with open(os.path.join(config["FEATURE_DIR"], "network_weights.pkl"), "rb") as f:
         feature_net_params = pickle.load(f)
     
-    # Handle case where feature_net_params might have seed dimension
+    # Handle seed dimension
     feature_net_params = jax.tree_util.tree_map(lambda x: x[0], feature_net_params)
     
     dataset_path = os.path.join(config["DATASET_DIR"], "dataset.npz")
@@ -998,6 +1040,14 @@ if __name__ == "__main__":
         with open(os.path.join(feature_dir, "params.json"), "r") as f:
             feature_params = json.load(f)
 
+        if hypers['main_dir'] is not None:
+            main_dir = load_env_dir(hypers['main_dir'], hypers["env_name"])
+            with open(os.path.join(main_dir, "params.json"), "r") as f:
+                main_params = json.load(f)
+        else:
+            main_dir = feature_dir
+            main_params = feature_params
+
         dataset_dir = load_env_dir(hypers['dataset_dir'], hypers["env_name"])
         with open(os.path.join(dataset_dir, "params.json"), "r") as f:
             dataset_params = json.load(f)
@@ -1030,6 +1080,9 @@ if __name__ == "__main__":
             "BONUS_WEIGHT": hypers.get("bonus_weight", 10),
             "FEATURE_PARAMS": feature_params,
             "FEATURE_DIR": feature_dir,
+            "MAIN_PARAMS": main_params,
+            "MAIN_DIR": main_dir,
+            "FEATURE_IDXS": hypers.get("feature_idxs", None),
             "DATASET_DIR": dataset_dir,
             "VERBOSE": args.verbose,
         }
@@ -1057,6 +1110,15 @@ if __name__ == "__main__":
         with open(os.path.join(config["FEATURE_DIR"], "network_weights.pkl"), "rb") as f:
             feature_net_params = pickle.load(f)
         print(f"Loaded feature network params from {os.path.join(config['FEATURE_DIR'], 'network_weights.pkl')}")
+
+        # Load main network weights
+        if config["MAIN_DIR"] != config["FEATURE_DIR"]:
+            with open(os.path.join(config["MAIN_DIR"], "network_weights.pkl"), "rb") as f:
+                main_net_params = pickle.load(f)
+            print(f"Loaded main network params from {os.path.join(config['MAIN_DIR'], 'network_weights.pkl')}")
+        else:
+            main_net_params = jnp.copy(feature_net_params)
+            print("Main network params are the same as feature network params.")
 
         # Load dataset
         dataset_path = os.path.join(config["DATASET_DIR"], "dataset.npz")
@@ -1096,8 +1158,8 @@ if __name__ == "__main__":
             # Outer vmap over num unique feature_net_weights, inner vmap over seeds
             train_jit = jax.jit(
                 jax.vmap(
-                    jax.vmap(train, in_axes=(None, None, 0)),
-                    in_axes=(0, None, None)
+                    jax.vmap(train, in_axes=(None, None, None, 0)),
+                    in_axes=(0, 0, None, None)
                     )
                 )
 
@@ -1106,6 +1168,7 @@ if __name__ == "__main__":
 
             compiled_train = train_jit.lower(
                 feature_net_params, 
+                main_net_params,
                 dataset, 
                 rngs
             ).compile()
@@ -1119,6 +1182,7 @@ if __name__ == "__main__":
 
             results = compiled_train(
                 feature_net_params,
+                main_net_params,
                 dataset,
                 rngs
             )

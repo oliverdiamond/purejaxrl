@@ -151,11 +151,7 @@ def make_stopping_condition(
     elif config["STOPPING_CONDITION"] == "percentile_no_val":
         #TODO Figure out what the stopping value should be. Normalized (or unnormalized) feature value with weight coefficient?
         def percentile_no_val_stop_cond(obs, params=None):
-            obs_features = feature_network.apply(
-                        feature_network_params, 
-                        obs,
-                        method=get_features
-                    ) # (batch_size, n_features)
+            obs_features = get_features(feature_network_params, obs) # (batch_size, n_features)
             stop_bonus = jnp.transpose(config["BONUS_WEIGHT"] * obs_features) # (n_features, batch_size)
             stop = jnp.transpose(obs_features >= percentile).astype(jnp.int32)  # (n_features, batch_size)
             
@@ -165,13 +161,9 @@ def make_stopping_condition(
     
     elif config["STOPPING_CONDITION"] == "percentile_val_only":
         def percentile_val_only_stop_cond(obs, params=None):
-            obs_features = feature_network.apply(
-                        feature_network_params, 
-                        obs,
-                        method=get_features
-                    ) # (batch_size, n_features)
+            obs_features = get_features(feature_network_params, obs) # (batch_size, n_features)
             stop = jnp.transpose(obs_features >= percentile).astype(jnp.int32)  # (n_features, batch_size)
-            state_val = feature_network.apply(feature_network_params, obs).max(axis=-1)  # (batch_size,)
+            state_val = main_network.apply(main_network_params, obs).max(axis=-1)  # (batch_size,)
             state_val = jnp.tile(state_val, (n_options, 1))  # (n_features, batch_size)
             return stop, state_val
         
@@ -179,13 +171,9 @@ def make_stopping_condition(
 
     elif config["STOPPING_CONDITION"] == "zscore_replacement":
         def zscore_replacement_stop_cond(obs, params=None):
-            obs_features = feature_network.apply(
-                        feature_network_params, 
-                        obs,
-                        method=get_features
-                    ) # (batch_size, n_features)
+            obs_features = get_features(feature_network_params, obs) # (batch_size, n_features)
             stop = jnp.transpose(obs_features >= zscore_threshold).astype(jnp.int32)  # (n_features, batch_size)
-            greedy_action_idxs = feature_network.apply(feature_network_params, obs).argmax(axis=-1)  # (batch_size,)
+            greedy_action_idxs = main_network.apply(main_network_params, obs).argmax(axis=-1)  # (batch_size,)
             action_vals_with_bonus = get_action_vals_with_bonus(obs)  # (n_features, batch_size, n_actions)
             state_vals_with_bonus = action_vals_with_bonus[:, jnp.arange(obs.shape[0]), greedy_action_idxs]  # (n_features, batch_size)
 
@@ -195,13 +183,9 @@ def make_stopping_condition(
 
     elif config["STOPPING_CONDITION"] == "zscore_addition":
         def zscore_addition_stop_cond(obs, params=None):
-            obs_features = feature_network.apply(
-                        feature_network_params, 
-                        obs,
-                        method=get_features
-                    ) # (batch_size, n_features)
+            obs_features = get_features(feature_network_params, obs) # (batch_size, n_features)
             stop = jnp.transpose(obs_features >= zscore_threshold).astype(jnp.int32)  # (n_features, batch_size)
-            state_val = feature_network.apply(feature_network_params, obs).max(axis=-1)  # (batch_size,)
+            state_val = main_network.apply(main_network_params, obs).max(axis=-1)  # (batch_size,)
             state_val = jnp.tile(state_val, (n_options, 1))  # (n_features, batch_size)
             stop_bonus = jnp.transpose(config["BONUS_WEIGHT"] * obs_features) # (n_features, batch_size)
             stop_val = state_val + stop_bonus
@@ -212,11 +196,7 @@ def make_stopping_condition(
 
     elif config["STOPPING_CONDITION"] == "zscore_no_val":
         def zscore_no_val_stop_cond(obs, params=None):
-            obs_features = feature_network.apply(
-                        feature_network_params, 
-                        obs,
-                        method=get_features
-                    ) # (batch_size, n_features)
+            obs_features = get_features(feature_network_params, obs) # (batch_size, n_features)
             stop_bonus = jnp.transpose(config["BONUS_WEIGHT"] * obs_features) # (n_features, batch_size)
             stop = jnp.transpose(obs_features >= zscore_threshold).astype(jnp.int32)  # (n_features, batch_size)
             
@@ -226,13 +206,9 @@ def make_stopping_condition(
     
     elif config["STOPPING_CONDITION"] == "zscore_val_only":
         def zscore_val_only_stop_cond(obs, params=None):
-            obs_features = feature_network.apply(
-                        feature_network_params, 
-                        obs,
-                        method=get_features
-                    ) # (batch_size, n_features)
+            obs_features = get_features(feature_network_params, obs) # (batch_size, n_features)
             stop = jnp.transpose(obs_features >= zscore_threshold).astype(jnp.int32)  # (n_features, batch_size)
-            state_val = feature_network.apply(feature_network_params, obs).max(axis=-1)  # (batch_size,)
+            state_val = main_network.apply(main_network_params, obs).max(axis=-1)  # (batch_size,)
             state_val = jnp.tile(state_val, (n_options, 1))  # (n_features, batch_size)
             return stop, state_val
         
@@ -541,6 +517,14 @@ def plot_qvals(network_params, config, save_dir):
     # Handle seed dimension
     feature_net_params = jax.tree_util.tree_map(lambda x: x[0], feature_net_params)
     
+    # Load main network parameters
+    if config["MAIN_DIR"] != config["FEATURE_DIR"]:
+        with open(os.path.join(config["MAIN_DIR"], "network_weights.pkl"), "rb") as f:
+            main_net_params = pickle.load(f)
+        main_net_params = jax.tree_util.tree_map(lambda x: x[0], main_net_params)
+    else:
+        main_net_params = jax.tree_util.tree_map(lambda x: x.copy(), feature_net_params)
+    
     dataset_path = os.path.join(config["DATASET_DIR"], "dataset.npz")
     data = np.load(dataset_path)
     dataset = {
@@ -551,22 +535,49 @@ def plot_qvals(network_params, config, save_dir):
         "done": jnp.array(data["done"]),
     }
     
-    # Create feature network and stopping condition
+    # Create feature network and main network
     feature_network = make_feature_network(config, action_dim=basic_env.action_space(env_params).n)
+    main_network = make_main_network(config, action_dim=basic_env.action_space(env_params).n)
     
     if config['USE_LAST_HIDDEN']:
-        get_features = feature_network.get_last_hidden
+        get_all_features = feature_network.get_last_hidden
     else:
-        get_features = feature_network.get_features
+        get_all_features = feature_network.get_features
+    
+    # Initialize to get feature dimensions
+    if config["IMG_OBS"]:
+        init_x = jnp.zeros((1,) + config["OBS_SHAPE"])
+    else:
+        init_x = jnp.zeros(config["OBS_SHAPE"])
+    
+    _all_features = feature_network.apply(
+        feature_net_params,
+        init_x,
+        method=get_all_features,
+    )
+    
+    if config['FEATURE_IDXS'] is not None:
+        feature_idxs = jnp.array(config['FEATURE_IDXS'])
+    else:
+        feature_idxs = jnp.arange(_all_features.shape[-1])
+    
+    get_features = lambda params, x: feature_network.apply(
+        params,
+        x,
+        method=get_all_features,
+    )[:, feature_idxs]
     
     stop_cond = make_stopping_condition(
         config, 
         feature_network, 
+        main_network,
         feature_net_params, 
+        main_net_params,
         get_features, 
         options_network,
         dataset, 
-        n_options
+        n_options,
+        feature_idxs
     )
     stop_cond = jax.jit(stop_cond)
     get_options_qvals = jax.jit(options_network.apply)
@@ -780,6 +791,14 @@ def plot_stopping_values(network_params, config, save_dir):
     # Handle case where feature_net_params might have seed dimension
     feature_net_params = jax.tree_util.tree_map(lambda x: x[0], feature_net_params)
     
+    # Load main network parameters
+    if config["MAIN_DIR"] != config["FEATURE_DIR"]:
+        with open(os.path.join(config["MAIN_DIR"], "network_weights.pkl"), "rb") as f:
+            main_net_params = pickle.load(f)
+        main_net_params = jax.tree_util.tree_map(lambda x: x[0], main_net_params)
+    else:
+        main_net_params = jax.tree_util.tree_map(lambda x: x.copy(), feature_net_params)
+    
     dataset_path = os.path.join(config["DATASET_DIR"], "dataset.npz")
     data = np.load(dataset_path)
     dataset = {
@@ -790,22 +809,49 @@ def plot_stopping_values(network_params, config, save_dir):
         "done": jnp.array(data["done"]),
     }
     
-    # Create feature network and stopping condition
+    # Create feature network and main network
     feature_network = make_feature_network(config, action_dim=basic_env.action_space(env_params).n)
+    main_network = make_main_network(config, action_dim=basic_env.action_space(env_params).n)
     
     if config['USE_LAST_HIDDEN']:
-        get_features = feature_network.get_last_hidden
+        get_all_features = feature_network.get_last_hidden
     else:
-        get_features = feature_network.get_features
+        get_all_features = feature_network.get_features
+    
+    # Initialize to get feature dimensions
+    if config["IMG_OBS"]:
+        init_x = jnp.zeros((1,) + config["OBS_SHAPE"])
+    else:
+        init_x = jnp.zeros(config["OBS_SHAPE"])
+    
+    _all_features = feature_network.apply(
+        feature_net_params,
+        init_x,
+        method=get_all_features,
+    )
+    
+    if config['FEATURE_IDXS'] is not None:
+        feature_idxs = jnp.array(config['FEATURE_IDXS'])
+    else:
+        feature_idxs = jnp.arange(_all_features.shape[-1])
+    
+    get_features = lambda params, x: feature_network.apply(
+        params,
+        x,
+        method=get_all_features,
+    )[:, feature_idxs]
     
     stop_cond = make_stopping_condition(
         config, 
         feature_network, 
+        main_network,
         feature_net_params, 
+        main_net_params,
         get_features, 
         options_network,
         dataset, 
-        n_options
+        n_options,
+        feature_idxs
     )
     stop_cond = jax.jit(stop_cond)
 
@@ -1040,7 +1086,7 @@ if __name__ == "__main__":
         with open(os.path.join(feature_dir, "params.json"), "r") as f:
             feature_params = json.load(f)
 
-        if hypers['main_dir'] is not None:
+        if 'main_dir' in hypers:
             main_dir = load_env_dir(hypers['main_dir'], hypers["env_name"])
             with open(os.path.join(main_dir, "params.json"), "r") as f:
                 main_params = json.load(f)
@@ -1117,7 +1163,7 @@ if __name__ == "__main__":
                 main_net_params = pickle.load(f)
             print(f"Loaded main network params from {os.path.join(config['MAIN_DIR'], 'network_weights.pkl')}")
         else:
-            main_net_params = jnp.copy(feature_net_params)
+            main_net_params = jax.tree_util.tree_map(lambda x: x.copy(), feature_net_params)
             print("Main network params are the same as feature network params.")
 
         # Load dataset

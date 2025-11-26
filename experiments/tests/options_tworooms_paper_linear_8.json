@@ -3,7 +3,7 @@
     "save_weights": true,
     "wandb_mode": "disabled",
     "metaParameters": {
-        "num_updates": 250000,
+        "num_updates": 300000,
         "feature_dir": "results/experiments/tests/tworooms_paper_linear.json/0",
         "dataset_dir": "results/experiments/tests/collect_tworooms_paper.json/0",
         "opt": "sgd",
@@ -14,19 +14,9 @@
         "activation": "linear",
         "use_last_hidden": true,
         "stopping_condition": [
-            "stomp_replacement",
-            "stomp_addition", 
-            "stomp_no_val", 
-            "percentile_replacement", 
-            "percentile_addition", 
-            "percentile_no_val", 
-            "percentile_val_only",
-            "zscore_replacement", 
-            "zscore_addition", 
-            "zscore_no_val", 
-            "zscore_val_only"
+            "stomp_replacement"
         ],
-        "bonus_weight": [0.1, 1, 10, 100],
+        "bonus_weight": [1],
         "feature_idxs": [[30]]
     }
 }

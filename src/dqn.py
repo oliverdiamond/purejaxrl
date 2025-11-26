@@ -328,7 +328,6 @@ def make_train(config):
             sample=jax.jit(buffer.sample),
             can_sample=jax.jit(buffer.can_sample),
         )
-        rng = jax.random.PRNGKey(0)  # use a dummy rng here
         _action = base_env.action_space().sample(rng)
         _last_obs, _last_env_state = base_env.reset(rng, env_params)
         _obs, _, _reward, _done, _ = base_env.step(rng, _last_env_state, _action, env_params)

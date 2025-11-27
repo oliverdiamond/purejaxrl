@@ -693,9 +693,10 @@ def plot_qvals(network_params, config, save_dir):
                         ax.text(triangle_center_x, triangle_center_y, q_text, ha='center', va='center', fontsize=q_value_fontsize, color='white', weight='bold')
                     
                     # Add white arrows for best action(s)
-                    # Round Q-values to thousandths place for comparison
-                    max_q = max(q_vals)
-                    best_actions = [i for i, q in enumerate(q_vals) if q == max_q]
+                    # Round Q-values to 4 decimal places for comparison
+                    q_vals_rounded = [round(float(q), 4) for q in q_vals]
+                    max_q = max(q_vals_rounded)
+                    best_actions = [i for i, q in enumerate(q_vals_rounded) if q == max_q]
 
                     # Direction vectors for each action: up, right, down, left
                     directions = [

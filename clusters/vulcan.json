@@ -2,7 +2,7 @@
     "type": "single_node",
     "account": "aip-amw8",
     "time": "2:59:00",
-    "cores": 2,
-    "mem_per_core": "64G",
-    "sequential": 1
+    "cores": 11,
+    "mem_per_core": "6G",
+    "sequential": 4
 }

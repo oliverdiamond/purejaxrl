@@ -6,7 +6,7 @@
         "total_timesteps": 100000,
         "seed": 0,
         "n_seeds": 1,
-        "env_name": "Maze",
+        "env_name": "MazeRGB",
         "activation": "relu"
     }
 }

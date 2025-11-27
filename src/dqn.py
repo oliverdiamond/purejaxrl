@@ -305,8 +305,8 @@ def make_train(config):
         jax.random.split(rng, n_envs), env_params
     )
     vmap_step = lambda n_envs: lambda rng, env_state, action: jax.vmap(
-        env.step, in_axes=(0, 0, 0, None, None)
-    )(jax.random.split(rng, n_envs), env_state, action, config["GAMMA"], env_params)
+        env.step, in_axes=(0, 0, 0, None)
+    )(jax.random.split(rng, n_envs), env_state, action, env_params)
 
     def train(rng):
 

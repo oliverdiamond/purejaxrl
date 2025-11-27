@@ -1,8 +1,7 @@
 matplotlib
 pandas
 jax[cuda12]
-jaxlib[cuda12]
-jaxtyping>=0.2.34
+jaxtyping
 gymnax
 distrax
 optax

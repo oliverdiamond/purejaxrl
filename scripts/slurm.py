@@ -469,7 +469,6 @@ echo "Loading modules"
 echo "=== === === === === === === === === "
 echo '{gpu_modules}'
 {gpu_modules}
-module load mujoco
 
 echo
 echo "=== === === === === === === === === "

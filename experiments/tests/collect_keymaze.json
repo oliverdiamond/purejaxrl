@@ -5,6 +5,6 @@
         "total_timesteps": 300000,
         "seed": 0,
         "num_envs": 1,
-        "env_name": "MazeRGB"
+        "env_name": "Maze9x9RGBWithKey"
     }
 }

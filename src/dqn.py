@@ -124,6 +124,88 @@ class QNet(nn.Module):
         last_hidden = self.head.layers[3](x)
 
         return last_hidden
+    
+class QNet2(nn.Module):
+    action_dim: int
+    
+    # Adjusted hyperparameters
+    conv1_dim: int = 16   # Start smaller
+    conv2_dim: int = 32   # Increase depth as image shrinks
+    dense_dim: int = 256  # Wide enough to hold spatial info
+
+    def setup(self):
+        w_conv_init = nn.initializers.variance_scaling(
+            scale=math.sqrt(2), mode='fan_avg', distribution='uniform') # He init is usually better for ReLU
+        w_init = nn.initializers.variance_scaling(
+            scale=1.0, mode='fan_avg', distribution='uniform')
+
+        # Conv Backbone
+        self.conv_backbone = nn.Sequential([
+            # Conv 1: Capture local walls/paths
+            nn.Conv(features=self.conv1_dim, kernel_size=(3, 3), strides=(1, 1), padding='SAME', kernel_init=w_conv_init),
+            nn.relu,
+            # Conv 2: Downsample slightly but increase feature richness
+            nn.Conv(features=self.conv2_dim, kernel_size=(3, 3), strides=(2, 2), padding='SAME', kernel_init=w_conv_init),
+            nn.relu
+        ])
+
+        # Combined Head (Simpler and wider)
+        self.head = nn.Sequential([
+            nn.Dense(self.dense_dim, kernel_init=w_init),
+            nn.relu,
+            nn.Dense(self.action_dim, kernel_init=w_init)
+        ])
+
+    def __call__(self, x: jnp.ndarray):
+        # 1. Conv Backbone
+        x = self.conv_backbone(x)
+        
+        # 2. Flatten 
+        # Output will be roughly 8x8x32 = 2048 features
+        x = x.reshape((x.shape[0], -1)) 
+        
+        # 3. Q-values
+        # We feed 2048 -> 256. This is a healthy 8:1 compression, much safer than 32:1
+        q = self.head(x)
+        return q
+
+    def get_activations(self, x: jnp.ndarray) -> dict[str, jnp.ndarray]:
+            """Returns intermediate activations."""
+            # 1. Conv Backbone
+            x = self.conv_backbone(x)
+            x = x.reshape((x.shape[0], -1)) 
+            
+            # 2. Manual traversal of the head to capture the 'rep'
+            # Layer 0: Dense(256)
+            x = self.head.layers[0](x)
+            # Layer 1: ReLU
+            rep = self.head.layers[1](x)
+            
+            # Layer 2: Output Dense
+            q = self.head.layers[2](rep)
+            
+            return {
+                "rep": rep, 
+                "q_values": q
+            }
+
+    def get_features(self, x: jnp.ndarray) -> jnp.ndarray:
+        """Returns the learned representation (output of the 256-unit layer)."""
+        # 1. Conv Backbone
+        x = self.conv_backbone(x)
+        x = x.reshape((x.shape[0], -1))
+        
+        # 2. Apply first part of head
+        x = self.head.layers[0](x) # Dense
+        rep = self.head.layers[1](x) # ReLU
+
+        return rep
+    
+    def get_last_hidden(self, x: jnp.ndarray) -> jnp.ndarray:
+        """Returns last hidden layer (Same as features in this shallower net)."""
+        # This is functionally identical to get_features in this specific 
+        # architecture, but kept separate to maintain your API.
+        return self.get_features(x)
 
 
 class QNetLinear(nn.Module):
@@ -254,25 +336,30 @@ class QNetFTA(nn.Module):
 
 def make_network(config, action_dim):
     """Returns the appropriate network based on the configuration."""
-    if config["ACTIVATION"] == "relu":
-        return QNet(
-            action_dim=action_dim,
-            conv1_dim=config["CONV1_DIM"],
-            conv2_dim=config["CONV2_DIM"],
-            rep_dim=config["REP_DIM"],
-            head_hidden_dim=config["HEAD_HIDDEN_DIM"]
-        )
-    elif config["ACTIVATION"] == "fta":
-        return QNetFTA(
-            action_dim=action_dim,
-            conv1_dim=config["CONV1_DIM"],
-            conv2_dim=config["CONV2_DIM"],
-            rep_dim=config["REP_DIM"],
-            head_hidden_dim=config["HEAD_HIDDEN_DIM"],
-            fta_eta=config["FTA_ETA"],
-            fta_tiles=config["FTA_TILES"],
-            fta_lower_bound=config["FTA_LOWER_BOUND"],
-            fta_upper_bound=config["FTA_UPPER_BOUND"]
+    if config["NETWORK_NAME"] == "QNet":
+        if config["ACTIVATION"] == "relu":
+            return QNet(
+                action_dim=action_dim,
+                conv1_dim=config["CONV1_DIM"],
+                conv2_dim=config["CONV2_DIM"],
+                rep_dim=config["REP_DIM"],
+                head_hidden_dim=config["HEAD_HIDDEN_DIM"]
+            )
+        elif config["ACTIVATION"] == "fta":
+            return QNetFTA(
+                action_dim=action_dim,
+                conv1_dim=config["CONV1_DIM"],
+                conv2_dim=config["CONV2_DIM"],
+                rep_dim=config["REP_DIM"],
+                head_hidden_dim=config["HEAD_HIDDEN_DIM"],
+                fta_eta=config["FTA_ETA"],
+                fta_tiles=config["FTA_TILES"],
+                fta_lower_bound=config["FTA_LOWER_BOUND"],
+                fta_upper_bound=config["FTA_UPPER_BOUND"]
+            )
+    elif config["NETWORK_NAME"] == "QNet2":
+        return QNet2(
+            action_dim=action_dim
         )
     elif config["ACTIVATION"] == "linear":
         return QNetLinear(
@@ -405,7 +492,7 @@ def make_train(config):
             # BUFFER UPDATE
             timestep = TimeStep(obs=last_obs, next_obs=obs, action=action, reward=reward, done=done) # type: ignore
             buffer_state = jax.lax.cond(
-                info['truncated'].any(),  # if any envs are truncated, do not add to buffer. Note this breaks parallel envs!
+                info['truncated'].any(),  # if any envs are truncated, do not add to buffer. Note this breaks parallel envs! In the future can change to traj buffer and get half without truncated obs if single env is slow
                 lambda: buffer_state,
                 lambda: buffer.add(buffer_state, timestep),
             )
@@ -504,24 +591,33 @@ def make_train(config):
 
             if config.get("VERBOSE"):
 
-                def callback(info):
-                    returns = info["reward_sum"][
-                        info["done"]
-                    ]
-                    steps = info["episode_step"][
-                        info["done"]
-                    ]
-                    timesteps = info["timestep"][info["done"]]
-                    loss = info["loss"][info["done"]]
+                # def callback(info):
+                #     returns = info["reward_sum"][
+                #         info["done"]
+                #     ]
+                #     steps = info["episode_step"][
+                #         info["done"]
+                #     ]
+                #     timesteps = info["timestep"][info["done"]]
+                #     loss = info["loss"][info["done"]]
 
-                    for t in range(len(timesteps)):
+                #     for t in range(len(timesteps)):
+                #         print(
+                #             " ".join(
+                #                 [
+                #                     f"global step={timesteps[t]},",
+                #                     f"return={returns[t]}",
+                #                     f"episode_step={steps[t]}",
+                #                     f"loss={loss[t]:.4f}",
+                #                 ]
+                #             )
+                #         )
+                def callback(info):
+                    if info["timestep"][0] % 1000 == 0:
                         print(
                             " ".join(
                                 [
-                                    f"global step={timesteps[t]},",
-                                    f"return={returns[t]}",
-                                    f"episode_step={steps[t]}",
-                                    f"loss={loss[t]:.4f}",
+                                    f"timestep={info['timestep'][0]},"
                                 ]
                             )
                         )
@@ -545,12 +641,79 @@ def make_train(config):
     return train
 
 
+def _get_all_observations_vectorized(basic_env, env_params, has_key=None):
+    """Generate all valid observations in a vectorized manner.
+    
+    Returns:
+        obs_batch: Array of observations for all valid locations
+        locations: List of (row, col) tuples corresponding to each observation
+        valid_mask: Boolean array indicating valid (non-obstacle, non-goal) locations
+    """
+    H = basic_env.H
+    W = basic_env.W
+    
+    # Create list of all locations and check validity
+    locations = []
+    valid_mask = np.zeros((H, W), dtype=bool)
+    
+    for row in range(H):
+        for col in range(W):
+            agent_loc = jnp.array([row, col])
+            is_obstacle = basic_env._obstacles_map[row, col] == 1.0
+            is_goal = jnp.array_equal(agent_loc, basic_env.goal_loc)
+            
+            if not is_obstacle and not is_goal:
+                locations.append((row, col))
+                valid_mask[row, col] = True
+    
+    # Generate all states and observations in one go
+    if len(locations) == 0:
+        return jnp.array([]), [], valid_mask
+    
+    # Create all states
+    agent_locs = jnp.array([[row, col] for row, col in locations])
+    key_loc = basic_env.fixed_key_loc if (has_key is not None and hasattr(basic_env, 'fixed_key_loc')) else jnp.array([0, 0])
+    
+    if has_key is not None:
+        states = jax.vmap(lambda loc: GridworldEnvState(
+            time=0,
+            agent_loc=loc,
+            has_key=jnp.array(has_key),
+            key_loc=key_loc
+        ))(agent_locs)
+    else:
+        states = jax.vmap(lambda loc: GridworldEnvState(
+            time=0,
+            agent_loc=loc
+        ))(agent_locs)
+    
+    # Vectorized observation generation
+    obs_batch = jax.vmap(lambda state: basic_env.get_obs(state, params=env_params))(states)
+    
+    return obs_batch, locations, valid_mask
+
+
 def plot_qvals(network_params, config, save_dir):
     """Performs a forward pass with final params and visualizes Q-values for all locations in the maze."""
     # Create environment
     basic_env, env_params = make(config["ENV_NAME"])
     network = make_network(config, action_dim=basic_env.action_space(env_params).n)
     
+    # Check if environment has a key
+    has_key_mechanism = hasattr(basic_env, 'fixed_key_loc') and hasattr(basic_env, 'use_fixed_key_loc')
+    
+    if has_key_mechanism and basic_env.use_fixed_key_loc:
+        # Plot for both has_key=False and has_key=True
+        for has_key in [False, True]:
+            _plot_qvals_single(network_params, config, save_dir, network, basic_env, env_params, has_key)
+    else:
+        # Plot without key consideration
+        _plot_qvals_single(network_params, config, save_dir, network, basic_env, env_params, None)
+
+
+def _plot_qvals_single(network_params, config, save_dir, network, basic_env, env_params, has_key):
+    print("Generating Q-value plot for has_key =", has_key)
+    """Helper function to plot Q-values for a single key state (or no key)."""
     # Get grid dimensions
     H = basic_env.H
     W = basic_env.W
@@ -558,29 +721,16 @@ def plot_qvals(network_params, config, save_dir):
     # Store Q-values for all agent_location pairs
     q_values_grid = jnp.zeros((H, W, 4))  # 4 actions: up, right, down, left
     
-    # Iterate over each location in the grid
-    for row in range(H):
-        for col in range(W):
-            agent_loc = jnp.array([row, col])
-            
-            # Check if this is a valid location for the agent (not an obstacle)
-            is_obstacle = basic_env._obstacles_map[row, col] == 1.0
-            is_goal = jnp.array_equal(agent_loc, basic_env.goal_loc)
-            
-            if not is_obstacle and not is_goal:
-                # Create new state with current agent location
-                current_state = GridworldEnvState(
-                    time=0,
-                    agent_loc=agent_loc
-                )
-                
-                # Generate observation for this state
-                obs = basic_env.get_obs(current_state, params=env_params)
-                obs_batch = jnp.expand_dims(obs, 0) # Add batch dimension
-                
-                # Forward pass through network
-                q_vals = network.apply(network_params, obs_batch)
-                q_values_grid = q_values_grid.at[row, col].set(q_vals[0])
+    # Vectorized observation generation and forward pass
+    obs_batch, locations, valid_mask = _get_all_observations_vectorized(basic_env, env_params, has_key)
+    
+    if len(locations) > 0:
+        # Single jitted forward pass for all locations
+        q_vals_all = jax.jit(network.apply)(network_params, obs_batch)
+        
+        # Fill in the grid with computed Q-values
+        for idx, (row, col) in enumerate(locations):
+            q_values_grid = q_values_grid.at[row, col].set(q_vals_all[idx])
     
     # Create visualization
     max_dim = max(H, W)
@@ -695,17 +845,41 @@ def plot_qvals(network_params, config, save_dir):
     ax.set_xticklabels([])
     ax.set_yticklabels([])
     title_fontsize = max(10, min(16, 100 / max_dim))
-    ax.set_title(f'Action Values for {config["ENV_NAME"]}', fontsize=title_fontsize)
+    
+    # Add key state to title if applicable
+    if has_key is not None:
+        key_state_str = "with key" if has_key else "without key"
+        ax.set_title(f'Action Values for {config["ENV_NAME"]} ({key_state_str})', fontsize=title_fontsize)
+    else:
+        ax.set_title(f'Action Values for {config["ENV_NAME"]}', fontsize=title_fontsize)
+    
     ax.grid(True, alpha=0.3, linewidth=edge_linewidth * 0.5)
+    
+    # Add key location marker if applicable
+    if has_key is not None and not has_key and hasattr(basic_env, 'fixed_key_loc'):
+        key_row, key_col = basic_env.fixed_key_loc
+        plot_key_row = H - 1 - key_row
+        # Draw a yellow 'K' for key location
+        ax.text(key_col + 0.5, plot_key_row + 0.5, 'K', ha='center', va='center', 
+                fontsize=label_fontsize * 1.5, color='gold', weight='bold', zorder=15,
+                bbox=dict(boxstyle='circle', facecolor='black', edgecolor='gold', linewidth=2))
     
     plt.tight_layout()
     os.makedirs(save_dir, exist_ok=True)
-    save_path = os.path.join(save_dir, f'q_vals_{config["ENV_NAME"]}.png')
+    
+    # Adjust filename based on key state
+    if has_key is not None:
+        key_suffix = "_with_key" if has_key else "_without_key"
+        save_path = os.path.join(save_dir, f'q_vals_{config["ENV_NAME"]}{key_suffix}.png')
+    else:
+        save_path = os.path.join(save_dir, f'q_vals_{config["ENV_NAME"]}.png')
+    
     plt.savefig(save_path, dpi=300, bbox_inches='tight')
 
     # Log figure to wandb if enabled
     if wandb.run is not None:
-        wandb.log({"q_values": wandb.Image(fig)})
+        log_key = f"q_values_{key_suffix[1:]}" if has_key is not None else "q_values"
+        wandb.log({log_key: wandb.Image(fig)})
 
     plt.close(fig)
 
@@ -714,47 +888,80 @@ def _plot_feature_heatmaps(network_params, config, save_dir, method_name, title,
     """Helper function to create heatmaps for any feature extraction method."""
     basic_env, env_params = make(config["ENV_NAME"])
     network = make_network(config, action_dim=basic_env.action_space(env_params).n)
+    
+    # Check if environment has a key
+    has_key_mechanism = hasattr(basic_env, 'fixed_key_loc') and hasattr(basic_env, 'use_fixed_key_loc')
+    
+    if has_key_mechanism and basic_env.use_fixed_key_loc:
+        # Plot for both has_key=False and has_key=True
+        for has_key in [False, True]:
+            key_suffix = "_with_key" if has_key else "_without_key"
+            modified_filename = filename.replace('.png', f'{key_suffix}.png')
+            key_state_str = "with key" if has_key else "without key"
+            modified_title = f"{title} ({key_state_str})"
+            _plot_feature_heatmaps_single(
+                network_params, config, save_dir, method_name, 
+                modified_title, modified_filename, network, basic_env, env_params, has_key
+            )
+    else:
+        # Plot without key consideration
+        _plot_feature_heatmaps_single(
+            network_params, config, save_dir, method_name, 
+            title, filename, network, basic_env, env_params, None
+        )
 
+def _plot_feature_heatmaps_single(network_params, config, save_dir, method_name, title, filename, network, basic_env, env_params, has_key):
+    """
+    Optimized heatmap plotter using vectorized inference and fast Matplotlib rendering.
+    """
     H = basic_env.H
     W = basic_env.W
-    goal_loc = tuple(np.array(basic_env.goal_loc))
-
-    feature_grid = None
-    valid_mask = np.zeros((H, W), dtype=bool)
-
-    # Collect feature values for all grid positions
-    for row in range(H):
-        for col in range(W):
-            agent_loc = jnp.array([row, col])
-
-            is_obstacle = basic_env._obstacles_map[row, col] == 1.0
-            is_goal = jnp.array_equal(agent_loc, basic_env.goal_loc)
+    
+    # --- 1. OPTIMIZATION: Pre-calculate static map features ---
+    # Instead of scanning the grid 64+ times inside the plotting loop, scan it once here.
+    obstacle_locs = []
+    penalty_locs = []
+    start_locs_list = []
+    
+    # We use basic numpy/python here as it's run only once per figure
+    for r in range(H):
+        for c in range(W):
+            if basic_env._obstacles_map[r, c] == 1.0:
+                obstacle_locs.append((r, c))
+            elif basic_env._penalty_map[r, c] != 0.0 and not np.array_equal([r,c], basic_env.goal_loc):
+                penalty_locs.append((r, c))
             
-            if is_obstacle or is_goal:
-                continue
+            # Check start locations
+            agent_loc = jnp.array([r, c])
+            is_start = any(jnp.array_equal(agent_loc, start_loc) for start_loc in basic_env._start_locs)
+            if is_start and basic_env._obstacles_map[r, c] != 1.0:
+                start_locs_list.append((r, c))
 
-            state = GridworldEnvState(time=0, agent_loc=agent_loc)
-            obs = basic_env.get_obs(state, params=env_params)
-            obs_batch = jnp.expand_dims(obs, 0)
-
-            # Get features using the specified method
-            features = network.apply(
-                network_params,
-                obs_batch,
-                method=getattr(network, method_name),
-            )
-            features = np.asarray(features)[0]
-
-            if feature_grid is None:
-                feature_grid = np.full((H, W, features.shape[-1]), np.nan, dtype=np.float32)
-
-            feature_grid[row, col, :] = features
-            valid_mask[row, col] = True
-
-    if feature_grid is None:
+    # --- 2. VECTORIZED INFERENCE ---
+    # Call your existing helper function
+    obs_batch, locations, valid_mask = _get_all_observations_vectorized(basic_env, env_params, has_key)
+    
+    if len(locations) == 0:
         return
+    
+    # JIT the network application for maximum speed
+    apply_fn = jax.jit(lambda params, obs: network.apply(
+        params, obs, method=getattr(network, method_name)
+    ))
+    
+    # One single call to the GPU for all grid cells
+    features_all = apply_fn(network_params, obs_batch)
+    features_all = np.asarray(features_all)
+    
+    # Fill the 3D grid (H, W, Features)
+    feature_dim = features_all.shape[-1]
+    feature_grid = np.full((H, W, feature_dim), np.nan, dtype=np.float32)
+    
+    # Map linear batch results back to (H, W) grid
+    for idx, (row, col) in enumerate(locations):
+        feature_grid[row, col, :] = features_all[idx]
 
-    feature_dim = feature_grid.shape[-1]
+    # --- 3. PLOTTING SETUP ---
     if config["ACTIVATION"] == "fta" and method_name == "get_features":
         cols = config["FTA_TILES"]
     else:
@@ -771,87 +978,90 @@ def _plot_feature_heatmaps(network_params, config, save_dir, method_name, title,
     value_fontsize = max(6, min(14, 90 / max(1, max_dim)))
     edge_linewidth = max(0.3, min(1.0, 8 / max_dim))
 
-    # Create color map
-    cmap = mcolors.LinearSegmentedColormap.from_list(
-        "feature_red",
-        ["#fee5d9", "#fcae91", "#fb6a4a", "#de2d26", "#a50f15"],
-    )
+    cmap = mcolors.LinearSegmentedColormap.from_list("feature_red", ["#fee5d9", "#fcae91", "#fb6a4a", "#de2d26", "#a50f15"])
 
+    # --- 4. FAST PLOTTING LOOP ---
     for feature_idx in range(feature_dim):
+        print(f"Plotting feature {feature_idx + 1}/{feature_dim}...")
         ax = axes_flat[feature_idx]
         feature_values = feature_grid[:, :, feature_idx]
 
-        # Compute normalization for this feature
+        # Calculate range only on valid values
         valid_values = feature_values[valid_mask]
         if valid_values.size:
-            feature_min = float(valid_values.min())
-            feature_max = float(valid_values.max())
-            if math.isclose(feature_max, feature_min, rel_tol=1e-6, abs_tol=1e-6):
-                feature_range = 1.0
-            else:
-                feature_range = feature_max - feature_min
+            feature_min, feature_max = float(valid_values.min()), float(valid_values.max())
+            feature_range = 1.0 if math.isclose(feature_max, feature_min) else feature_max - feature_min
         else:
-            feature_min = feature_max = 0.0
-            feature_range = 1.0
+            feature_min, feature_max, feature_range = 0.0, 1.0, 1.0
 
-        # Draw the grid using the same approach as plot_qvals
-        for row in range(H):
-            for col in range(W):
-                agent_loc = jnp.array([row, col])
-                is_obstacle = basic_env._obstacles_map[row, col] == 1.0
-                is_goal = jnp.array_equal(agent_loc, basic_env.goal_loc)
-                
-                # Use same coordinate transformation as plot_qvals
+        # Prepare Mask (Obstacles + Goal)
+        obstacle_mask = basic_env._obstacles_map.astype(bool)
+        goal_mask = np.zeros((H, W), dtype=bool)
+        goal_mask[int(basic_env.goal_loc[0]), int(basic_env.goal_loc[1])] = True
+        mask = obstacle_mask | goal_mask
+
+        # --- IMPORTANT TRANSFORMATION ---
+        # 1. Flip data Upside-Down (UD) because Gridworld (0,0) is top-left, 
+        #    but plotting origin='lower' expects (0,0) at bottom-left.
+        feature_values_flipped = np.flipud(feature_values)
+        mask_flipped = np.flipud(mask)
+        
+        # 2. Create masked array so obstacles appear white/empty initially
+        masked_features = np.ma.array(feature_values_flipped, mask=mask_flipped)
+
+        # 3. Use imshow with extent. This renders the whole grid instantly.
+        #    extent=[0, W, 0, H] aligns the image pixels exactly with the patch coordinates below.
+        im = ax.imshow(masked_features, cmap=cmap, vmin=feature_min, vmax=feature_max, 
+                       origin='lower', interpolation='nearest', extent=[0, W, 0, H])
+
+        # --- DRAW OVERLAYS (Using pre-calculated lists for speed) ---
+        
+        # Obstacles
+        for r, c in obstacle_locs:
+            plot_row = H - 1 - r
+            rect = patches.Rectangle((c, plot_row), 1, 1, linewidth=edge_linewidth, 
+                                    edgecolor='black', facecolor='grey', zorder=5)
+            ax.add_patch(rect)
+
+        # Goal
+        goal_row, goal_col = int(basic_env.goal_loc[0]), int(basic_env.goal_loc[1])
+        plot_goal_row = H - 1 - goal_row
+        rect = patches.Rectangle((goal_col, plot_goal_row), 1, 1, linewidth=edge_linewidth, 
+                                edgecolor='black', facecolor='green', zorder=5)
+        ax.add_patch(rect)
+        ax.text(goal_col + 0.5, plot_goal_row + 0.5, 'G', ha='center', va='center', 
+               fontsize=value_fontsize, color='white', weight='bold', zorder=6)
+
+        # Text Values (Only iterate valid locations)
+        for idx, (row, col) in enumerate(locations):
+            raw_value = feature_values[row, col]
+            if not np.isnan(raw_value):
                 plot_row = H - 1 - row
-                
-                if is_obstacle:
-                    # Draw obstacle as grey
-                    rect = patches.Rectangle((col, plot_row), 1, 1, linewidth=edge_linewidth, 
-                                            edgecolor='black', facecolor='grey')
-                    ax.add_patch(rect)
-                elif is_goal:
-                    # Draw goal as green
-                    rect = patches.Rectangle((col, plot_row), 1, 1, linewidth=edge_linewidth, 
-                                            edgecolor='black', facecolor='green')
-                    ax.add_patch(rect)
-                    ax.text(col + 0.5, plot_row + 0.5, 'G', ha='center', va='center', 
-                           fontsize=value_fontsize, color='white', weight='bold')
-                else:
-                    # Draw valid cell with color based on feature value
-                    raw_value = feature_values[row, col]
-                    if not np.isnan(raw_value):
-                        # Normalize to [0, 1]
-                        intensity = (raw_value - feature_min) / feature_range if feature_range > 0 else 0.5
-                        
-                        # Get color from colormap
-                        color = cmap(intensity)
-                        
-                        rect = patches.Rectangle((col, plot_row), 1, 1, linewidth=edge_linewidth, 
-                                                edgecolor='black', facecolor=color)
-                        ax.add_patch(rect)
-                        
-                        # Add text with value
-                        text_color = "white" if intensity > 0.6 else "black"
-                        ax.text(col + 0.5, plot_row + 0.5, f'{raw_value:.2f}', 
-                               ha='center', va='center', fontsize=value_fontsize, color=text_color)
-                    else:
-                        # No data - draw as grey
-                        rect = patches.Rectangle((col, plot_row), 1, 1, linewidth=edge_linewidth, 
-                                                edgecolor='black', facecolor='grey')
-                        ax.add_patch(rect)
-                
-                # Add yellow dot in upper right if this state is in a penalty region
-                has_penalty = basic_env._penalty_map[row, col] != 0.0
-                if has_penalty and not is_obstacle and not is_goal:
-                    dot_size = max(10, min(50, 200 / max(1, max_dim)))
-                    ax.scatter(col + 0.85, plot_row + 0.85, s=dot_size, c='yellow', 
-                              edgecolors='black', linewidths=edge_linewidth * 0.5, zorder=10)
-                
-                # Add green 'S' in upper right if this is a start state
-                is_start = any(jnp.array_equal(agent_loc, start_loc) for start_loc in basic_env._start_locs)
-                if is_start and not is_obstacle and not is_goal:
-                    ax.text(col + 0.85, plot_row + 0.85, 'S', ha='center', va='center', 
-                           fontsize=value_fontsize + 2, color='green', weight='bold', zorder=11)
+                intensity = (raw_value - feature_min) / feature_range if feature_range > 0 else 0.5
+                text_color = "white" if intensity > 0.6 else "black"
+                ax.text(col + 0.5, plot_row + 0.5, f'{raw_value:.2f}', 
+                       ha='center', va='center', fontsize=value_fontsize, color=text_color, zorder=7)
+
+        # Penalty Dots
+        for r, c in penalty_locs:
+            plot_row = H - 1 - r
+            dot_size = max(10, min(50, 200 / max(1, max_dim)))
+            ax.scatter(c + 0.85, plot_row + 0.85, s=dot_size, c='yellow', 
+                      edgecolors='black', linewidths=edge_linewidth * 0.5, zorder=10)
+
+        # Start Markers
+        for r, c in start_locs_list:
+            plot_row = H - 1 - r
+            ax.text(c + 0.85, plot_row + 0.85, 'S', ha='center', va='center', 
+                   fontsize=value_fontsize + 2, color='green', weight='bold', zorder=11)
+        
+        # Key Marker
+        if has_key is not None and not has_key and hasattr(basic_env, 'fixed_key_loc'):
+            key_row, key_col = basic_env.fixed_key_loc
+            plot_key_row = H - 1 - key_row
+            ax.text(key_col + 0.5, plot_key_row + 0.5, 'K', ha='center', va='center', 
+                    fontsize=value_fontsize + 4, color='gold', weight='bold', zorder=15,
+                    bbox=dict(boxstyle='circle', facecolor='black', edgecolor='gold', linewidth=1.5))
 
         ax.set_xlim(0, W)
         ax.set_ylim(0, H)
@@ -860,30 +1070,33 @@ def _plot_feature_heatmaps(network_params, config, save_dir, method_name, title,
         ax.set_yticks([])
         ax.set_title(f"Feature {feature_idx}", fontsize=value_fontsize + 2)
 
+    print("hiding unused subplots...")
+    # Hide unused subplots
     for idx in range(feature_dim, len(axes_flat)):
         axes_flat[idx].axis("off")
 
+    print("adding tight layout...")
     fig.suptitle(title, fontsize=value_fontsize + 6)
     plt.tight_layout(rect=(0, 0, 1, 0.96))
 
+    print("saving figure...")
     os.makedirs(save_dir, exist_ok=True)
     save_path = os.path.join(save_dir, filename)
     plt.savefig(save_path, dpi=300, bbox_inches="tight")
-
     plt.close(fig)
 
 
 def plot_rep_heatmaps(network_params, config, save_dir):
     """Visualizes representation features and last hidden layer as heatmaps across all valid agent locations."""
     # Plot representation layer heatmaps
-    _plot_feature_heatmaps(
-        network_params, 
-        config, 
-        save_dir, 
-        "get_features", 
-        "Representation Layer Activations", 
-        f"rep_heatmaps_{config['ENV_NAME']}.png"
-    )
+    # _plot_feature_heatmaps(
+    #     network_params, 
+    #     config, 
+    #     save_dir, 
+    #     "get_features", 
+    #     "Representation Layer Activations", 
+    #     f"rep_heatmaps_{config['ENV_NAME']}.png"
+    # )
     
     # Plot last hidden layer heatmaps
     if config["ACTIVATION"] != "linear":
@@ -974,6 +1187,7 @@ if __name__ == "__main__":
             "LEARNING_STARTS": 1000,
             "TRAINING_INTERVAL": 1,
             "GAMMA": 0.99,
+            "NETWORK_NAME": hypers["network_name"],
             "OPT": hypers.get("opt", "adam"),
             "LEARNING_RATE": hypers.get("learning_rate", 1e-4),
             "LR_LINEAR_DECAY": hypers.get("lr_linear_decay", False),

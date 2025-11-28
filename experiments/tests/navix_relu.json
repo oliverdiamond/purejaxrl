@@ -1,0 +1,18 @@
+{
+    "agent": "dqn",
+    "save_weights": true,
+    "wandb_mode": "disabled",
+    "metaParameters": {
+        "total_timesteps": 10000,
+        "seed": 0,
+        "n_seeds": 1,
+        "env_name": "Navix-Empty-5x5-v0",
+        "env_kwargs": {
+            "obs_type": "rgb",
+            "rew_type": "sparse",
+            "transition_type": "stochastic",
+            "termination_type": "some_termination_type"
+        },
+        "activation": "relu"
+    }
+}

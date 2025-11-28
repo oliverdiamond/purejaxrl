@@ -3,10 +3,11 @@
     "save_weights": true,
     "wandb_mode": "disabled",
     "metaParameters": {
-        "total_timesteps": 300000,
+        "total_timesteps": 1000,
         "seed": 0,
         "n_seeds": 1,
-        "env_name": "MazeRGB",
+        "env_name": "Maze9x9RGBWithKey",
+        "network_name": "QNet2",
         "activation": "relu"
     }
 }

@@ -35,7 +35,7 @@ from environments.gridworld import EnvState as GridworldEnvState, Gridworld
 from util import get_time_str, WANDB_ENTITY, WANDB_PROJECT
 from util.fta import fta
 from experiment import experiment_model
-from dqn import QNet, QNetFTA, QNetLinear
+from dqn import QNet, QNet2, QNetFTA, QNetLinear
 
 def make_stopping_condition(
     config, 
@@ -169,6 +169,15 @@ def make_stopping_condition(
         
         return percentile_val_only_stop_cond
 
+    elif config["STOPPING_CONDITION"] == "percentile_no_bonus":
+        #TODO Figure out what the stopping value should be. Normalized (or unnormalized) feature value with weight coefficient?
+        def percentile_no_bonus_stop_cond(obs, params=None):
+            obs_features = get_features(feature_network_params, obs) # (batch_size, n_features)
+            stop = jnp.transpose(obs_features >= percentile).astype(jnp.int32)  # (n_features, batch_size)
+            return stop, jnp.zeros_like(stop, dtype=jnp.float32)
+
+        return percentile_no_bonus_stop_cond
+
     elif config["STOPPING_CONDITION"] == "zscore_replacement":
         def zscore_replacement_stop_cond(obs, params=None):
             obs_features = get_features(feature_network_params, obs) # (batch_size, n_features)
@@ -213,28 +222,36 @@ def make_stopping_condition(
             return stop, state_val
         
         return zscore_val_only_stop_cond
+
+    elif config["STOPPING_CONDITION"] == "zscore_no_bonus":
+        def zscore_no_bonus_stop_cond(obs, params=None):
+            obs_features = get_features(feature_network_params, obs) # (batch_size, n_features)
+            stop = jnp.transpose(obs_features >= zscore_threshold).astype(jnp.int32)  # (n_features, batch_size)
+            return stop, jnp.zeros_like(stop, dtype=jnp.float32)
+        
+        return zscore_no_bonus_stop_cond
     
     else:
         raise ValueError(f"Unknown stopping condition: {config['STOPPING_CONDITION']}")
     
 def make_options_network(config, action_dim, n_options):
     """Returns the appropriate network based on the configuration."""
-    if config["ACTIVATION"] == "relu":
-        # Option Networks
-        return nn.vmap(
-            QNet,
-            variable_axes={'params': 0},
-            split_rngs={'params': True},
-            in_axes=(None,),
-            out_axes=0,
-            axis_size=n_options,
-            methods=['__call__']
-        )(action_dim=action_dim, 
-          conv1_dim=config["CONV1_DIM"], 
-          conv2_dim=config["CONV2_DIM"], 
-          rep_dim=config["REP_DIM"])
-
-    elif config["ACTIVATION"] == "linear":
+    if config["NETWORK_NAME"] == "QNet":
+        if config["ACTIVATION"] == "relu":
+            # Option Networks
+            return nn.vmap(
+                QNet,
+                variable_axes={'params': 0},
+                split_rngs={'params': True},
+                in_axes=(None,),
+                out_axes=0,
+                axis_size=n_options,
+                methods=['__call__']
+            )(action_dim=action_dim, 
+            conv1_dim=config["CONV1_DIM"], 
+            conv2_dim=config["CONV2_DIM"], 
+            rep_dim=config["REP_DIM"])
+    elif config["NETWORK_NAME"] == "QNetLinear":
         return nn.vmap(
             QNetLinear,
             variable_axes={'params': 0},
@@ -244,7 +261,16 @@ def make_options_network(config, action_dim, n_options):
             axis_size=n_options,
             methods=['__call__']
         )(action_dim=action_dim)
-
+    elif config["NETWORK_NAME"] == "QNet2":
+        return nn.vmap(
+            QNet2,
+            variable_axes={'params': 0},
+            split_rngs={'params': True},
+            in_axes=(None,),
+            out_axes=0,
+            axis_size=n_options,
+            methods=['__call__']
+        )(action_dim=action_dim)
     else:
         raise ValueError("Option learning currently only supports ReLU activations")
     
@@ -253,30 +279,35 @@ def make_feature_network(config, action_dim):
     feature_net_type = config["FEATURE_PARAMS"]["agent"].lower()
     feature_net_hypers = config["FEATURE_PARAMS"]["metaParameters"]
     if feature_net_type == "dqn":
-        if feature_net_hypers["activation"] == "relu":
-            return QNet(
-                action_dim=action_dim,
-                conv1_dim=feature_net_hypers.get("conv1_dim", 32),
-                conv2_dim=feature_net_hypers.get("conv2_dim", 16),
-                rep_dim=feature_net_hypers.get("rep_dim", 32),
-                head_hidden_dim=feature_net_hypers.get("head_hidden_dim", 64)
-            )
-        elif feature_net_hypers["activation"] == "fta":
-            return QNetFTA(
-                action_dim=action_dim,
-                conv1_dim=feature_net_hypers.get('conv1_dim', 32),
-                conv2_dim=feature_net_hypers.get('conv2_dim', 16),
-                rep_dim=feature_net_hypers.get('rep_dim', 32),
-                head_hidden_dim=feature_net_hypers.get("head_hidden_dim", 64),
-                fta_eta=feature_net_hypers.get('fta_eta', 2),
-                fta_tiles=feature_net_hypers.get("fta_tiles", 20),
-                fta_lower_bound=feature_net_hypers.get("fta_lower_bound", -20.0),
-                fta_upper_bound=feature_net_hypers.get("fta_upper_bound", 20.0),
-            )        
-        elif feature_net_hypers["activation"] == "linear":
+        if feature_net_hypers["network_name"] == "QNet":
+            if feature_net_hypers["activation"] == "relu":
+                return QNet(
+                    action_dim=action_dim,
+                    conv1_dim=feature_net_hypers.get("conv1_dim", 32),
+                    conv2_dim=feature_net_hypers.get("conv2_dim", 16),
+                    rep_dim=feature_net_hypers.get("rep_dim", 32),
+                    head_hidden_dim=feature_net_hypers.get("head_hidden_dim", 64)
+                )
+            elif feature_net_hypers["activation"] == "fta":
+                return QNetFTA(
+                    action_dim=action_dim,
+                    conv1_dim=feature_net_hypers.get('conv1_dim', 32),
+                    conv2_dim=feature_net_hypers.get('conv2_dim', 16),
+                    rep_dim=feature_net_hypers.get('rep_dim', 32),
+                    head_hidden_dim=feature_net_hypers.get("head_hidden_dim", 64),
+                    fta_eta=feature_net_hypers.get('fta_eta', 2),
+                    fta_tiles=feature_net_hypers.get("fta_tiles", 20),
+                    fta_lower_bound=feature_net_hypers.get("fta_lower_bound", -20.0),
+                    fta_upper_bound=feature_net_hypers.get("fta_upper_bound", 20.0),
+                )        
+        elif feature_net_hypers["network_name"] == "QNetLinear":
             return QNetLinear(
                 action_dim=action_dim
             )
+        elif feature_net_hypers["network_name"] == "QNet2":
+            return QNet2(
+            action_dim=action_dim
+        )
     else:
         raise ValueError(f"Unknown feature network: {feature_net_type}")
 
@@ -285,30 +316,35 @@ def make_main_network(config, action_dim):
     main_net_type = config["MAIN_PARAMS"]["agent"].lower()
     main_net_hypers = config["MAIN_PARAMS"]["metaParameters"]
     if main_net_type == "dqn":
-        if main_net_hypers["activation"] == "relu":
-            return QNet(
-                action_dim=action_dim,
-                conv1_dim=main_net_hypers.get("conv1_dim", 32),
-                conv2_dim=main_net_hypers.get("conv2_dim", 16),
-                rep_dim=main_net_hypers.get("rep_dim", 32),
-                head_hidden_dim=main_net_hypers.get("head_hidden_dim", 64)
-            )
-        elif main_net_hypers["activation"] == "fta":
-            return QNetFTA(
-                action_dim=action_dim,
-                conv1_dim=main_net_hypers.get('conv1_dim', 32),
-                conv2_dim=main_net_hypers.get('conv2_dim', 16),
-                rep_dim=main_net_hypers.get('rep_dim', 32),
-                head_hidden_dim=main_net_hypers.get("head_hidden_dim", 64),
-                fta_eta=main_net_hypers.get('fta_eta', 2),
-                fta_tiles=main_net_hypers.get("fta_tiles", 20),
-                fta_lower_bound=main_net_hypers.get("fta_lower_bound", -20.0),
-                fta_upper_bound=main_net_hypers.get("fta_upper_bound", 20.0),
-            )        
-        elif main_net_hypers["activation"] == "linear":
+        if main_net_hypers["network_name"] == "QNet":
+            if main_net_hypers["activation"] == "relu":
+                return QNet(
+                    action_dim=action_dim,
+                    conv1_dim=main_net_hypers.get("conv1_dim", 32),
+                    conv2_dim=main_net_hypers.get("conv2_dim", 16),
+                    rep_dim=main_net_hypers.get("rep_dim", 32),
+                    head_hidden_dim=main_net_hypers.get("head_hidden_dim", 64)
+                )
+            elif main_net_hypers["activation"] == "fta":
+                return QNetFTA(
+                    action_dim=action_dim,
+                    conv1_dim=main_net_hypers.get('conv1_dim', 32),
+                    conv2_dim=main_net_hypers.get('conv2_dim', 16),
+                    rep_dim=main_net_hypers.get('rep_dim', 32),
+                    head_hidden_dim=main_net_hypers.get("head_hidden_dim", 64),
+                    fta_eta=main_net_hypers.get('fta_eta', 2),
+                    fta_tiles=main_net_hypers.get("fta_tiles", 20),
+                    fta_lower_bound=main_net_hypers.get("fta_lower_bound", -20.0),
+                    fta_upper_bound=main_net_hypers.get("fta_upper_bound", 20.0),
+                )        
+        elif main_net_hypers["network_name"] == "QNetLinear":
             return QNetLinear(
                 action_dim=action_dim
             )
+        elif main_net_hypers["network_name"] == "QNet2":
+            return QNet2(
+            action_dim=action_dim
+        )
     else:
         raise ValueError(f"Unknown feature network: {main_net_type}")
 
@@ -491,15 +527,360 @@ def make_train(config):
 
     return train
 
+def _get_all_observations_vectorized(basic_env, env_params, has_key=None):
+    """Generate all valid observations in a vectorized manner.
+    
+    Returns:
+        obs_batch: Array of observations for all valid locations
+        locations: List of (row, col) tuples corresponding to each observation
+        valid_mask: Boolean array indicating valid (non-obstacle, non-goal) locations
+    """
+    H = basic_env.H
+    W = basic_env.W
+    
+    # Create list of all locations and check validity
+    locations = []
+    valid_mask = np.zeros((H, W), dtype=bool)
+    
+    for row in range(H):
+        for col in range(W):
+            agent_loc = jnp.array([row, col])
+            is_obstacle = basic_env._obstacles_map[row, col] == 1.0
+            is_goal = jnp.array_equal(agent_loc, basic_env.goal_loc)
+            
+            if not is_obstacle and not is_goal:
+                locations.append((row, col))
+                valid_mask[row, col] = True
+    
+    # Generate all states and observations in one go
+    if len(locations) == 0:
+        return jnp.array([]), [], valid_mask
+    
+    # Create all states
+    agent_locs = jnp.array([[row, col] for row, col in locations])
+    key_loc = basic_env.fixed_key_loc if (has_key is not None and hasattr(basic_env, 'fixed_key_loc')) else jnp.array([0, 0])
+    
+    if has_key is not None:
+        states = jax.vmap(lambda loc: GridworldEnvState(
+            time=0,
+            agent_loc=loc,
+            has_key=jnp.array(has_key),
+            key_loc=key_loc
+        ))(agent_locs)
+    else:
+        states = jax.vmap(lambda loc: GridworldEnvState(
+            time=0,
+            agent_loc=loc
+        ))(agent_locs)
+    
+    # Vectorized observation generation
+    obs_batch = jax.vmap(lambda state: basic_env.get_obs(state, params=env_params))(states)
+    
+    return obs_batch, locations, valid_mask
+
+def _get_static_locs(basic_env):
+    """Pre-calculates lists of static environment features to avoid looping later."""
+    H, W = basic_env.H, basic_env.W
+    obstacle_locs = []
+    penalty_locs = []
+    start_locs = []
+    
+    # Identify key locations once
+    for r in range(H):
+        for c in range(W):
+            if basic_env._obstacles_map[r, c] == 1.0:
+                obstacle_locs.append((r, c))
+            elif basic_env._penalty_map[r, c] != 0.0 and not np.array_equal([r,c], basic_env.goal_loc):
+                penalty_locs.append((r, c))
+            
+            # Start locations
+            agent_loc = jnp.array([r, c])
+            is_start = any(jnp.array_equal(agent_loc, sl) for sl in basic_env._start_locs)
+            if is_start and basic_env._obstacles_map[r, c] != 1.0:
+                start_locs.append((r, c))
+                
+    return obstacle_locs, penalty_locs, start_locs
+
+def plot_stopping_values(network_params, config, save_dir):
+    """Visualizes stopping values for all locations in the maze for each option."""
+    # Create environment
+    basic_env, env_params = make(config["ENV_NAME"])
+    # Check if environment has a key
+    has_key_mechanism = hasattr(basic_env, 'fixed_key_loc') and hasattr(basic_env, 'use_fixed_key_loc')
+    if has_key_mechanism and basic_env.use_fixed_key_loc:
+        for has_key in [False, True]:
+            _plot_stopping_values_single(network_params, config, save_dir, basic_env, env_params, has_key)
+    else:
+        _plot_stopping_values_single(network_params, config, save_dir, basic_env, env_params, None)
+
+def _plot_stopping_values_single(network_params, config, save_dir, basic_env, env_params, has_key):
+    """Optimized plotter using imshow and vectorized inference."""
+    H = basic_env.H
+    W = basic_env.W
+    
+    # 1. Pre-calculate static lists
+    obstacle_locs, penalty_locs, start_locs_list = _get_static_locs(basic_env)
+
+    # Determine n_options from network_params
+    n_options = jax.tree_util.tree_leaves(network_params)[0].shape[0]
+
+    # Create options network
+    options_network = make_options_network(
+        config, 
+        action_dim=basic_env.action_space(env_params).n, 
+        n_options=n_options
+    )
+
+    # Load feature network and dataset for stopping condition
+    with open(os.path.join(config["FEATURE_DIR"], "network_weights.pkl"), "rb") as f:
+        feature_net_params = pickle.load(f)
+    
+    # Handle case where feature_net_params might have seed dimension
+    feature_net_params = jax.tree_util.tree_map(lambda x: x[0], feature_net_params)
+    
+    # Load main network parameters
+    if config["MAIN_DIR"] != config["FEATURE_DIR"]:
+        with open(os.path.join(config["MAIN_DIR"], "network_weights.pkl"), "rb") as f:
+            main_net_params = pickle.load(f)
+        main_net_params = jax.tree_util.tree_map(lambda x: x[0], main_net_params)
+    else:
+        main_net_params = jax.tree_util.tree_map(lambda x: x.copy(), feature_net_params)
+    
+    dataset_path = os.path.join(config["DATASET_DIR"], "dataset.npz")
+    data = np.load(dataset_path)
+    dataset = {
+        "obs": jnp.array(data["obs"]),
+        "action": jnp.array(data["action"]),
+        "next_obs": jnp.array(data["next_obs"]),
+        "reward": jnp.array(data["reward"]),
+        "done": jnp.array(data["done"]),
+    }
+    
+    # Create feature network and main network
+    feature_network = make_feature_network(config, action_dim=basic_env.action_space(env_params).n)
+    main_network = make_main_network(config, action_dim=basic_env.action_space(env_params).n)
+    
+    if config['USE_LAST_HIDDEN']:
+        get_all_features = feature_network.get_last_hidden
+    else:
+        get_all_features = feature_network.get_features
+    
+    # Initialize to get feature dimensions
+    if config["IMG_OBS"]:
+        init_x = jnp.zeros((1,) + config["OBS_SHAPE"])
+    else:
+        init_x = jnp.zeros(config["OBS_SHAPE"])
+    
+    _all_features = feature_network.apply(
+        feature_net_params,
+        init_x,
+        method=get_all_features,
+    )
+    
+    if config['FEATURE_IDXS'] is not None:
+        feature_idxs = jnp.array(config['FEATURE_IDXS'])
+    else:
+        feature_idxs = jnp.arange(_all_features.shape[-1])
+    
+    get_features = lambda params, x: feature_network.apply(
+        params,
+        x,
+        method=get_all_features,
+    )[:, feature_idxs]
+    
+    stop_cond = make_stopping_condition(
+        config, 
+        feature_network, 
+        main_network,
+        feature_net_params, 
+        main_net_params,
+        get_features, 
+        options_network,
+        dataset, 
+        n_options,
+        feature_idxs
+    )
+    stop_cond = jax.jit(stop_cond)
+    
+    # --- 2. VECTORIZED INFERENCE (Same as before) ---
+    obs_batch, locations, valid_mask = _get_all_observations_vectorized(basic_env, env_params, has_key)
+    
+    # Initialize grids
+    stop_val_grid = np.zeros((n_options, H, W))
+    stop_grid = np.zeros((n_options, H, W))
+    
+    if len(locations) > 0:
+        if "percentile" in config["STOPPING_CONDITION"]:
+            stop_all, stop_val_all = stop_cond(obs_batch)
+        else:
+            stop_all, stop_val_all = stop_cond(obs_batch, network_params)
+            
+        # Move to CPU for plotting
+        stop_val_all = np.array(stop_val_all)
+        stop_all = np.array(stop_all)
+        
+        # Fill grids
+        for idx, (row, col) in enumerate(locations):
+            stop_val_grid[:, row, col] = stop_val_all[:, idx]
+            stop_grid[:, row, col] = stop_all[:, idx]
+
+    # --- 3. FAST PLOTTING ---
+    cols = int(math.ceil(math.sqrt(n_options)))
+    rows = int(math.ceil(n_options / cols))
+    
+    max_dim = max(H, W)
+    base_fig_size = max(8, max_dim * 0.8)
+    fig_size_w = min(base_fig_size * cols, 25 * cols)
+    fig_size_h = min(base_fig_size * rows, 25 * rows)
+
+    fig, axes = plt.subplots(rows, cols, figsize=(fig_size_w, fig_size_h), squeeze=False)
+    axes_flat = axes.flat
+
+    value_fontsize = max(6, min(14, 90 / max(1, max_dim)))
+    label_fontsize = max(8, min(24, 120 / max_dim))
+    edge_linewidth = max(0.3, min(1.0, 8 / max_dim))
+
+    cmap = mcolors.LinearSegmentedColormap.from_list("stopping_red", ["#fee5d9", "#fcae91", "#fb6a4a", "#de2d26", "#a50f15"])
+
+    for option_idx in range(n_options):
+        ax = axes_flat[option_idx]
+        
+        current_stop_vals = stop_val_grid[option_idx]
+        
+        # Normalize
+        valid_vals = current_stop_vals[valid_mask]
+        if valid_vals.size:
+            v_min, v_max = float(valid_vals.min()), float(valid_vals.max())
+            v_range = 1.0 if math.isclose(v_max, v_min) else v_max - v_min
+        else:
+            v_min, v_max, v_range = 0.0, 1.0, 1.0
+
+        # Prepare Mask for imshow (Flip UD for correct orientation)
+        obs_mask = basic_env._obstacles_map.astype(bool)
+        goal_mask = np.zeros((H, W), dtype=bool)
+        goal_mask[int(basic_env.goal_loc[0]), int(basic_env.goal_loc[1])] = True
+        total_mask = obs_mask | goal_mask
+        
+        data_flipped = np.flipud(current_stop_vals)
+        mask_flipped = np.flipud(total_mask)
+        masked_data = np.ma.array(data_flipped, mask=mask_flipped)
+
+        # Plot Heatmap
+        im = ax.imshow(masked_data, cmap=cmap, vmin=v_min, vmax=v_max, 
+                       origin='lower', interpolation='nearest', extent=[0, W, 0, H])
+
+        # --- Draw Overlays (Vectorized-ish) ---
+        
+        # Obstacles
+        for r, c in obstacle_locs:
+            plot_row = H - 1 - r
+            rect = patches.Rectangle((c, plot_row), 1, 1, linewidth=edge_linewidth, 
+                                    edgecolor='black', facecolor='grey')
+            ax.add_patch(rect)
+            
+        # Goal
+        goal_row, goal_col = int(basic_env.goal_loc[0]), int(basic_env.goal_loc[1])
+        plot_goal_row = H - 1 - goal_row
+        rect = patches.Rectangle((goal_col, plot_goal_row), 1, 1, linewidth=edge_linewidth, 
+                                edgecolor='black', facecolor='green')
+        ax.add_patch(rect)
+        ax.text(goal_col + 0.5, plot_goal_row + 0.5, 'G', ha='center', va='center', 
+               fontsize=label_fontsize, color='white', weight='bold')
+
+        # Text Values
+        for idx, (row, col) in enumerate(locations):
+            val = current_stop_vals[row, col]
+            plot_row = H - 1 - row
+            intensity = (val - v_min) / v_range if v_range > 0 else 0.5
+            text_color = "white" if intensity > 0.6 else "black"
+            ax.text(col + 0.5, plot_row + 0.5, f'{val:.2f}', 
+                   ha='center', va='center', fontsize=value_fontsize, color=text_color)
+
+        # Green Outlines for Stopping
+        # Get coordinates where stopping is true
+        stop_rows, stop_cols = np.where(stop_grid[option_idx] == 1)
+        for r, c in zip(stop_rows, stop_cols):
+             plot_row = H - 1 - r
+             rect_outline = patches.Rectangle((c, plot_row), 1, 1, linewidth=edge_linewidth * 3, 
+                                             edgecolor='lime', facecolor='none', zorder=10)
+             ax.add_patch(rect_outline)
+
+        # Penalties
+        for r, c in penalty_locs:
+            plot_row = H - 1 - r
+            dot_size = max(10, min(50, 200 / max(1, max_dim)))
+            ax.scatter(c + 0.85, plot_row + 0.85, s=dot_size, c='yellow', 
+                      edgecolors='black', linewidths=edge_linewidth * 0.5, zorder=10)
+
+        # Starts
+        for r, c in start_locs_list:
+            plot_row = H - 1 - r
+            ax.text(c + 0.85, plot_row + 0.85, 'S', ha='center', va='center', 
+                   fontsize=label_fontsize, color='green', weight='bold', zorder=11)
+                   
+        # Key
+        if has_key is not None and not has_key and hasattr(basic_env, 'fixed_key_loc'):
+            key_row, key_col = basic_env.fixed_key_loc
+            plot_key_row = H - 1 - key_row
+            ax.text(key_col + 0.5, plot_key_row + 0.5, 'K', ha='center', va='center', 
+                    fontsize=label_fontsize * 1.2, color='gold', weight='bold', zorder=15,
+                    bbox=dict(boxstyle='circle', facecolor='black', edgecolor='gold', linewidth=1.5))
+
+        ax.set_xlim(0, W)
+        ax.set_ylim(0, H)
+        ax.set_aspect('equal')
+        ax.set_xticks([])
+        ax.set_yticks([])
+        title_fontsize = max(10, min(16, 100 / max_dim))
+        ax.set_title(f'Option {option_idx} Stopping Values', fontsize=title_fontsize)
+
+    for i in range(n_options, len(axes_flat)):
+        axes_flat[i].axis('off')
+        
+    # [Rest of saving logic remains the same]
+    if has_key is not None:
+        key_state_str = "with key" if has_key else "without key"
+        title_suffix = f" ({key_state_str})"
+    else:
+        title_suffix = ""
+    
+    fig.suptitle(f'Stopping Values for {config["ENV_NAME"]}{title_suffix}.', fontsize=max(12, min(20, 120 / max_dim)))
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+    os.makedirs(save_dir, exist_ok=True)
+    
+    if has_key is not None:
+        key_suffix = "_with_key" if has_key else "_without_key"
+        save_path = os.path.join(save_dir, f'stopping_vals_{config["ENV_NAME"]}{key_suffix}.png')
+    else:
+        save_path = os.path.join(save_dir, f'stopping_vals_{config["ENV_NAME"]}.png')
+    
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.close(fig)
+
 def plot_qvals(network_params, config, save_dir):
     """Performs a forward pass with final params and visualizes Q-values for all locations in the maze for each option."""
     # Create environment
     basic_env, env_params = make(config["ENV_NAME"])
     
-    # Get grid dimensions
+    # Check if environment has a key
+    has_key_mechanism = hasattr(basic_env, 'fixed_key_loc') and hasattr(basic_env, 'use_fixed_key_loc')
+    
+    if has_key_mechanism and basic_env.use_fixed_key_loc:
+        # Plot for both has_key=False and has_key=True
+        for has_key in [False, True]:
+            _plot_qvals_single(network_params, config, save_dir, basic_env, env_params, has_key)
+    else:
+        # Plot without key consideration
+        _plot_qvals_single(network_params, config, save_dir, basic_env, env_params, None)
+
+def _plot_qvals_single(network_params, config, save_dir, basic_env, env_params, has_key):
+    """Optimized Q-value plotter using Quiver for arrows."""
     H = basic_env.H
     W = basic_env.W
     
+    # 1. Pre-calculate static lists
+    obstacle_locs, penalty_locs, start_locs_list = _get_static_locs(basic_env)
+
     # Determine n_options from network_params
     n_options = jax.tree_util.tree_leaves(network_params)[0].shape[0]
 
@@ -582,44 +963,29 @@ def plot_qvals(network_params, config, save_dir):
     stop_cond = jax.jit(stop_cond)
     get_options_qvals = jax.jit(options_network.apply)
 
-    # Store Q-values and stopping info for all agent_location pairs for each option
-    q_values_grid = jnp.zeros((n_options, H, W, 4))  # (n_options, H, W, 4 actions)
-    stop_grid = jnp.zeros((n_options, H, W), dtype=jnp.int32)  # (n_options, H, W)
-    stop_val_grid = jnp.zeros((n_options, H, W))  # (n_options, H, W)
+    # 2. VECTORIZED INFERENCE
+    obs_batch, locations, valid_mask = _get_all_observations_vectorized(basic_env, env_params, has_key)
     
-    # Iterate over each location in the grid
-    for row in range(H):
-        for col in range(W):
-            agent_loc = jnp.array([row, col])
+    q_values_grid = np.zeros((n_options, H, W, 4))
+    stop_grid = np.zeros((n_options, H, W))
+    
+    if len(locations) > 0:
+        q_vals_all_options = get_options_qvals(network_params, obs_batch)
+        
+        # Helper for stop cond (mocking the call logic slightly for brevity)
+        if "percentile" in config["STOPPING_CONDITION"]:
+            stop_all, _ = stop_cond(obs_batch)
+        else:
+            stop_all, _ = stop_cond(obs_batch, network_params)
             
-            # Check if this is a valid location for the agent (not an obstacle)
-            is_obstacle = basic_env._obstacles_map[row, col] == 1.0
-            is_goal = jnp.array_equal(agent_loc, basic_env.goal_loc)
-            
-            if not is_obstacle and not is_goal:
-                # Create new state with current agent location
-                current_state = GridworldEnvState(
-                    time=0,
-                    agent_loc=agent_loc
-                )
-                
-                # Generate observation for this state
-                obs = basic_env.get_obs(current_state, params=env_params)
-                obs_batch = jnp.expand_dims(obs, 0) # Add batch dimension
-                
-                # Forward pass through network for all options
-                q_vals_all_options = get_options_qvals(network_params, obs_batch) # (n_options, 1, n_actions)
-                q_values_grid = q_values_grid.at[:, row, col].set(q_vals_all_options[:, 0, :])
-                
-                # Get stopping condition for this state
-                if "percentile" in config["STOPPING_CONDITION"]:
-                    stop, stop_val = stop_cond(obs_batch)  # (n_options, 1)
-                else:
-                    stop, stop_val = stop_cond(obs_batch, network_params)  # (n_options, 1)
-                stop_grid = stop_grid.at[:, row, col].set(stop[:, 0])
-                stop_val_grid = stop_val_grid.at[:, row, col].set(stop_val[:, 0])
+        q_vals_all_options = np.array(q_vals_all_options)
+        stop_all = np.array(stop_all)
 
-    # Create visualization
+        for idx, (row, col) in enumerate(locations):
+            q_values_grid[:, row, col] = q_vals_all_options[:, idx, :]
+            stop_grid[:, row, col] = stop_all[:, idx]
+
+    # 3. PLOTTING
     cols = int(math.ceil(math.sqrt(n_options)))
     rows = int(math.ceil(n_options / cols))
     
@@ -635,386 +1001,136 @@ def plot_qvals(network_params, config, save_dir):
     label_fontsize = max(8, min(24, 120 / max_dim))
     edge_linewidth = max(0.3, min(1.0, 8 / max_dim))
 
+    # Directions for arrows (Up, Right, Down, Left)
+    # (U, V) components
+    arrow_dirs = np.array([(0, 1), (1, 0), (0, -1), (-1, 0)])
+
     for option_idx in range(n_options):
+        print("Plotting Q-values for option", option_idx)
         ax = axes_flat[option_idx]
+        current_q_grid = q_values_grid[option_idx]
         
-        # Normalize Q-values for color mapping for this option
-        valid_q_values = []
-        for row in range(H):
-            for col in range(W):
-                is_obstacle = basic_env._obstacles_map[row, col] == 1.0
-                is_goal = jnp.array_equal(jnp.array([row, col]), basic_env.goal_loc)
-                if not is_obstacle and not is_goal:
-                    valid_q_values.extend(q_values_grid[option_idx, row, col])
-        
-        if valid_q_values:
-            q_min, q_max = min(valid_q_values), max(valid_q_values)
-            q_range = q_max - q_min if q_max > q_min else 1.0
+        # Calculate range
+        valid_q = current_q_grid[valid_mask]
+        if valid_q.size:
+            q_min, q_max = float(valid_q.min()), float(valid_q.max())
+            q_range = 1.0 if math.isclose(q_max, q_min) else q_max - q_min
         else:
             q_min, q_max, q_range = 0, 1, 1
 
-        # Draw the grid for this option
-        for row in range(H):
-            for col in range(W):
-                agent_loc = jnp.array([row, col])
-                is_obstacle = basic_env._obstacles_map[row, col] == 1.0
-                is_goal = jnp.array_equal(agent_loc, basic_env.goal_loc)
-                
-                plot_row = H - 1 - row
-                
-                if is_obstacle:
-                    rect = patches.Rectangle((col, plot_row), 1, 1, linewidth=edge_linewidth, edgecolor='black', facecolor='black')
-                    ax.add_patch(rect)
-                elif is_goal:
-                    rect = patches.Rectangle((col, plot_row), 1, 1, linewidth=edge_linewidth, edgecolor='black', facecolor='green')
-                    ax.add_patch(rect)
-                    ax.text(col + 0.5, plot_row + 0.5, 'G', ha='center', va='center', fontsize=label_fontsize, color='white', weight='bold')
-                else:
-                    q_vals = q_values_grid[option_idx, row, col]
-                    
-                    triangles = [
-                        [(col, plot_row + 1), (col + 1, plot_row + 1), (col + 0.5, plot_row + 0.5)],  # up
-                        [(col + 1, plot_row + 1), (col + 1, plot_row), (col + 0.5, plot_row + 0.5)],    # right
-                        [(col + 1, plot_row), (col, plot_row), (col + 0.5, plot_row + 0.5)],      # down
-                        [(col, plot_row), (col, plot_row + 1), (col + 0.5, plot_row + 0.5)]       # left
-                    ]
-                    
-                    for q_val, triangle_verts in zip(q_vals, triangles):
-                        intensity = (q_val - q_min) / q_range if q_range > 0 else 0.5
-                        color_intensity = float(max(0.1, min(1.0, intensity)))
-                        
-                        triangle = patches.Polygon(triangle_verts, closed=True, facecolor=(0, 0, color_intensity, 0.8), edgecolor='black', linewidth=edge_linewidth * 0.5)
-                        ax.add_patch(triangle)
-                        
-                        triangle_center_x = sum(v[0] for v in triangle_verts) / 3
-                        triangle_center_y = sum(v[1] for v in triangle_verts) / 3
-                        
-                        q_text = f'{float(q_val):.2f}'
-                        ax.text(triangle_center_x, triangle_center_y, q_text, ha='center', va='center', fontsize=q_value_fontsize, color='white', weight='bold')
-                    
-                    # Add white arrows for best action(s)
-                    # Round Q-values to 4 decimal places for comparison
-                    q_vals_rounded = [round(float(q), 4) for q in q_vals]
-                    max_q = max(q_vals_rounded)
-                    best_actions = [i for i, q in enumerate(q_vals_rounded) if q == max_q]
+        # Draw Obstacles (Vectorized)
+        for r, c in obstacle_locs:
+            plot_row = H - 1 - r
+            rect = patches.Rectangle((c, plot_row), 1, 1, linewidth=edge_linewidth, edgecolor='black', facecolor='black')
+            ax.add_patch(rect)
 
-                    # Direction vectors for each action: up, right, down, left
-                    directions = [
-                        (0, 0.2),   # up
-                        (0.2, 0),   # right
-                        (0, -0.2),  # down
-                        (-0.2, 0)   # left
-                    ]
-                    
-                    arrow_width = max(0.06, min(0.1, 0.6 / max_dim))
-                    arrow_head_width = arrow_width * 3
-                    arrow_head_length = arrow_width * 1.5
-                    
-                    for action_idx in best_actions:
-                        dx, dy = directions[action_idx]
-                        ax.arrow(col + 0.5, plot_row + 0.5, dx, dy, 
-                                head_width=arrow_head_width, head_length=arrow_head_length, 
-                                fc='orange', ec='orange', linewidth=edge_linewidth, 
-                                zorder=12, length_includes_head=True, alpha=0.8)
-                
-                # Add yellow dot in upper right if this state is in a penalty region
-                has_penalty = basic_env._penalty_map[row, col] != 0.0
-                if has_penalty and not is_obstacle and not is_goal:
-                    dot_size = max(20, min(100, 400 / max_dim))
-                    ax.scatter(col + 0.85, plot_row + 0.85, s=dot_size, c='yellow', 
-                              edgecolors='black', linewidths=edge_linewidth, zorder=10)
-                
-                # Add green 'S' in upper right if this is a start state
-                is_start = any(jnp.array_equal(agent_loc, start_loc) for start_loc in basic_env._start_locs)
-                if is_start and not is_obstacle and not is_goal:
-                    ax.text(col + 0.85, plot_row + 0.85, 'S', ha='center', va='center', 
-                           fontsize=label_fontsize, color='green', weight='bold', zorder=11)
-                
-                # Add black cell border
-                rect = patches.Rectangle((col, plot_row), 1, 1, linewidth=edge_linewidth, edgecolor='black', facecolor='none')
-                ax.add_patch(rect)
-        
-        # Add green outlines for stopping conditions in a second pass (to ensure they're on top)
-        for row in range(H):
-            for col in range(W):
-                plot_row = H - 1 - row
-                if stop_grid[option_idx, row, col] == 1:
-                    rect_outline = patches.Rectangle((col, plot_row), 1, 1, linewidth=edge_linewidth * 3, 
-                                                     edgecolor='lime', facecolor='none', zorder=10)
-                    ax.add_patch(rect_outline)
-        
-        ax.set_xlim(0, W)
-        ax.set_ylim(0, H)
-        ax.set_aspect('equal')
-        ax.set_xticks([])
-        ax.set_yticks([])
-        ax.set_xticklabels([])
-        ax.set_yticklabels([])
-        title_fontsize = max(10, min(16, 100 / max_dim))
-        ax.set_title(f'Option {option_idx} Q-Values', fontsize=title_fontsize)
-        ax.grid(True, alpha=0.3, linewidth=edge_linewidth * 0.5)
+        # Draw Goal
+        goal_row, goal_col = int(basic_env.goal_loc[0]), int(basic_env.goal_loc[1])
+        plot_goal_row = H - 1 - goal_row
+        rect = patches.Rectangle((goal_col, plot_goal_row), 1, 1, linewidth=edge_linewidth, edgecolor='black', facecolor='green')
+        ax.add_patch(rect)
+        ax.text(goal_col + 0.5, plot_goal_row + 0.5, 'G', ha='center', va='center', fontsize=label_fontsize, color='white', weight='bold')
 
-    for i in range(n_options, len(axes_flat)):
-        axes_flat[i].axis('off')
+        # PREPARE ARROW DATA FOR QUIVER (Batching Arrows)
+        quiver_X, quiver_Y, quiver_U, quiver_V = [], [], [], []
 
-    fig.suptitle(f'Option Action Values for {config["ENV_NAME"]}. \n Stopping Condition: {config["STOPPING_CONDITION"]} \n Bonus weight: {config["BONUS_WEIGHT"]} \n Use last hidden layer: {config["USE_LAST_HIDDEN"]}', fontsize=max(12, min(20, 120 / max_dim)))
-    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-    os.makedirs(save_dir, exist_ok=True)
-    save_path = os.path.join(save_dir, f'q_vals_{config["ENV_NAME"]}.png')
-    plt.savefig(save_path, dpi=300, bbox_inches='tight')
-
-    plt.close(fig)
-
-
-def plot_stopping_values(network_params, config, save_dir):
-    """Visualizes stopping values for all locations in the maze for each option."""
-    # Create environment
-    basic_env, env_params = make(config["ENV_NAME"])
-    
-    # Get grid dimensions
-    H = basic_env.H
-    W = basic_env.W
-    
-    # Determine n_options from network_params
-    n_options = jax.tree_util.tree_leaves(network_params)[0].shape[0]
-
-    # Create options network
-    options_network = make_options_network(
-        config, 
-        action_dim=basic_env.action_space(env_params).n, 
-        n_options=n_options
-    )
-
-    # Load feature network and dataset for stopping condition
-    with open(os.path.join(config["FEATURE_DIR"], "network_weights.pkl"), "rb") as f:
-        feature_net_params = pickle.load(f)
-    
-    # Handle case where feature_net_params might have seed dimension
-    feature_net_params = jax.tree_util.tree_map(lambda x: x[0], feature_net_params)
-    
-    # Load main network parameters
-    if config["MAIN_DIR"] != config["FEATURE_DIR"]:
-        with open(os.path.join(config["MAIN_DIR"], "network_weights.pkl"), "rb") as f:
-            main_net_params = pickle.load(f)
-        main_net_params = jax.tree_util.tree_map(lambda x: x[0], main_net_params)
-    else:
-        main_net_params = jax.tree_util.tree_map(lambda x: x.copy(), feature_net_params)
-    
-    dataset_path = os.path.join(config["DATASET_DIR"], "dataset.npz")
-    data = np.load(dataset_path)
-    dataset = {
-        "obs": jnp.array(data["obs"]),
-        "action": jnp.array(data["action"]),
-        "next_obs": jnp.array(data["next_obs"]),
-        "reward": jnp.array(data["reward"]),
-        "done": jnp.array(data["done"]),
-    }
-    
-    # Create feature network and main network
-    feature_network = make_feature_network(config, action_dim=basic_env.action_space(env_params).n)
-    main_network = make_main_network(config, action_dim=basic_env.action_space(env_params).n)
-    
-    if config['USE_LAST_HIDDEN']:
-        get_all_features = feature_network.get_last_hidden
-    else:
-        get_all_features = feature_network.get_features
-    
-    # Initialize to get feature dimensions
-    if config["IMG_OBS"]:
-        init_x = jnp.zeros((1,) + config["OBS_SHAPE"])
-    else:
-        init_x = jnp.zeros(config["OBS_SHAPE"])
-    
-    _all_features = feature_network.apply(
-        feature_net_params,
-        init_x,
-        method=get_all_features,
-    )
-    
-    if config['FEATURE_IDXS'] is not None:
-        feature_idxs = jnp.array(config['FEATURE_IDXS'])
-    else:
-        feature_idxs = jnp.arange(_all_features.shape[-1])
-    
-    get_features = lambda params, x: feature_network.apply(
-        params,
-        x,
-        method=get_all_features,
-    )[:, feature_idxs]
-    
-    stop_cond = make_stopping_condition(
-        config, 
-        feature_network, 
-        main_network,
-        feature_net_params, 
-        main_net_params,
-        get_features, 
-        options_network,
-        dataset, 
-        n_options,
-        feature_idxs
-    )
-    stop_cond = jax.jit(stop_cond)
-
-    # Store stopping values for all agent_location pairs for each option
-    stop_val_grid = jnp.zeros((n_options, H, W))  # (n_options, H, W)
-    stop_grid = jnp.zeros((n_options, H, W))  # (n_options, H, W) for binary stopping decisions
-    
-    # Iterate over each location in the grid
-    for row in range(H):
-        for col in range(W):
-            agent_loc = jnp.array([row, col])
+        # Draw Triangles and Prepare Arrows (Only loop valid locs)
+        for row, col in locations:
+            plot_row = H - 1 - row
+            q_vals = current_q_grid[row, col]
             
-            # Check if this is a valid location for the agent (not an obstacle)
-            is_obstacle = basic_env._obstacles_map[row, col] == 1.0
-            is_goal = jnp.array_equal(agent_loc, basic_env.goal_loc)
+            # Draw 4 triangles
+            triangles = [
+                [(col, plot_row + 1), (col + 1, plot_row + 1), (col + 0.5, plot_row + 0.5)], # up
+                [(col + 1, plot_row + 1), (col + 1, plot_row), (col + 0.5, plot_row + 0.5)],   # right
+                [(col + 1, plot_row), (col, plot_row), (col + 0.5, plot_row + 0.5)],     # down
+                [(col, plot_row), (col, plot_row + 1), (col + 0.5, plot_row + 0.5)]      # left
+            ]
             
-            if not is_obstacle and not is_goal:
-                # Create new state with current agent location
-                current_state = GridworldEnvState(
-                    time=0,
-                    agent_loc=agent_loc
-                )
+            for i, (q_val, verts) in enumerate(zip(q_vals, triangles)):
+                intensity = (q_val - q_min) / q_range if q_range > 0 else 0.5
+                color_intensity = float(max(0.1, min(1.0, intensity)))
                 
-                # Generate observation for this state
-                obs = basic_env.get_obs(current_state, params=env_params)
-                obs_batch = jnp.expand_dims(obs, 0) # Add batch dimension
+                # We still add patches individually here as PolyCollection is complex with text
+                # But we've stripped all other logic out of this loop
+                poly = patches.Polygon(verts, closed=True, facecolor=(0, 0, color_intensity, 0.8), 
+                                     edgecolor='black', linewidth=edge_linewidth * 0.5)
+                ax.add_patch(poly)
                 
-                # Get stopping value for this state
-                if "percentile" in config["STOPPING_CONDITION"]:
-                    stop, stop_val = stop_cond(obs_batch)  # (n_options, 1)
-                else:
-                    stop, stop_val = stop_cond(obs_batch, network_params)  # (n_options, 1)
-                stop_val_grid = stop_val_grid.at[:, row, col].set(stop_val[:, 0])
-                stop_grid = stop_grid.at[:, row, col].set(stop[:, 0])
+                # Text
+                cx = sum(v[0] for v in verts) / 3
+                cy = sum(v[1] for v in verts) / 3
+                ax.text(cx, cy, f'{q_val:.2f}', ha='center', va='center', fontsize=q_value_fontsize, color='white', weight='bold')
 
-    # Create visualization
-    cols = int(math.ceil(math.sqrt(n_options)))
-    rows = int(math.ceil(n_options / cols))
-    
-    max_dim = max(H, W)
-    base_fig_size = max(8, max_dim * 0.8)
-    fig_size_w = min(base_fig_size * cols, 25 * cols)
-    fig_size_h = min(base_fig_size * rows, 25 * rows)
+            # Collect Arrow Data
+            q_rounded = np.round(q_vals, 4)
+            best_actions = np.where(q_rounded == q_rounded.max())[0]
+            
+            for action_idx in best_actions:
+                u, v = arrow_dirs[action_idx]
+                quiver_X.append(col + 0.5)
+                quiver_Y.append(plot_row + 0.5)
+                quiver_U.append(u)
+                quiver_V.append(v)
 
-    fig, axes = plt.subplots(rows, cols, figsize=(fig_size_w, fig_size_h), squeeze=False)
-    axes_flat = axes.flat
+        # PLOT ALL ARROWS AT ONCE (Quiver)
+        if quiver_X:
+            ax.quiver(quiver_X, quiver_Y, quiver_U, quiver_V, 
+                     color='orange', scale=None, scale_units='xy', angles='xy',
+                     width=0.015, headwidth=4, headlength=4, pivot='mid', zorder=12, alpha=0.8)
 
-    value_fontsize = max(6, min(14, 90 / max(1, max_dim)))
-    label_fontsize = max(8, min(24, 120 / max_dim))
-    edge_linewidth = max(0.3, min(1.0, 8 / max_dim))
+        # Overlays
+        stop_rows, stop_cols = np.where(stop_grid[option_idx] == 1)
+        for r, c in zip(stop_rows, stop_cols):
+             plot_row = H - 1 - r
+             rect = patches.Rectangle((c, plot_row), 1, 1, linewidth=edge_linewidth * 3, 
+                                     edgecolor='lime', facecolor='none', zorder=10)
+             ax.add_patch(rect)
 
-    # Create color map (red gradient)
-    cmap = mcolors.LinearSegmentedColormap.from_list(
-        "stopping_red",
-        ["#fee5d9", "#fcae91", "#fb6a4a", "#de2d26", "#a50f15"],
-    )
+        for r, c in penalty_locs:
+            plot_row = H - 1 - r
+            ax.scatter(c + 0.85, plot_row + 0.85, s=max(20, min(100, 400/max_dim)), c='yellow', edgecolors='black', zorder=10)
+            
+        for r, c in start_locs_list:
+            plot_row = H - 1 - r
+            ax.text(c + 0.85, plot_row + 0.85, 'S', ha='center', va='center', fontsize=label_fontsize, color='green', weight='bold', zorder=11)
 
-    for option_idx in range(n_options):
-        ax = axes_flat[option_idx]
-        
-        # Compute normalization for this option
-        valid_stop_values = []
-        for row in range(H):
-            for col in range(W):
-                is_obstacle = basic_env._obstacles_map[row, col] == 1.0
-                is_goal = jnp.array_equal(jnp.array([row, col]), basic_env.goal_loc)
-                if not is_obstacle and not is_goal:
-                    valid_stop_values.append(float(stop_val_grid[option_idx, row, col]))
-        
-        if valid_stop_values:
-            stop_min = min(valid_stop_values)
-            stop_max = max(valid_stop_values)
-            if math.isclose(stop_max, stop_min, rel_tol=1e-6, abs_tol=1e-6):
-                stop_range = 1.0
-            else:
-                stop_range = stop_max - stop_min
-        else:
-            stop_min = stop_max = 0.0
-            stop_range = 1.0
-
-        # Draw the grid for this option
-        for row in range(H):
-            for col in range(W):
-                agent_loc = jnp.array([row, col])
-                is_obstacle = basic_env._obstacles_map[row, col] == 1.0
-                is_goal = jnp.array_equal(agent_loc, basic_env.goal_loc)
-                
-                plot_row = H - 1 - row
-                
-                if is_obstacle:
-                    rect = patches.Rectangle((col, plot_row), 1, 1, linewidth=edge_linewidth, 
-                                            edgecolor='black', facecolor='grey')
-                    ax.add_patch(rect)
-                elif is_goal:
-                    rect = patches.Rectangle((col, plot_row), 1, 1, linewidth=edge_linewidth, 
-                                            edgecolor='black', facecolor='green')
-                    ax.add_patch(rect)
-                    ax.text(col + 0.5, plot_row + 0.5, 'G', ha='center', va='center', 
-                           fontsize=label_fontsize, color='white', weight='bold')
-                else:
-                    # Draw valid cell with color based on stopping value
-                    stop_value = float(stop_val_grid[option_idx, row, col])
-                    
-                    # Normalize to [0, 1]
-                    intensity = (stop_value - stop_min) / stop_range if stop_range > 0 else 0.5
-                    
-                    # Get color from colormap
-                    color = cmap(intensity)
-                    
-                    rect = patches.Rectangle((col, plot_row), 1, 1, linewidth=edge_linewidth, 
-                                            edgecolor='black', facecolor=color)
-                    ax.add_patch(rect)
-                    
-                    # Add text with value
-                    text_color = "white" if intensity > 0.6 else "black"
-                    ax.text(col + 0.5, plot_row + 0.5, f'{stop_value:.2f}', 
-                           ha='center', va='center', fontsize=value_fontsize, color=text_color)
-                
-                # Add yellow dot in upper right if this state is in a penalty region
-                has_penalty = basic_env._penalty_map[row, col] != 0.0
-                if has_penalty and not is_obstacle and not is_goal:
-                    dot_size = max(10, min(50, 200 / max(1, max_dim)))
-                    ax.scatter(col + 0.85, plot_row + 0.85, s=dot_size, c='yellow', 
-                              edgecolors='black', linewidths=edge_linewidth * 0.5, zorder=10)
-                
-                # Add green 'S' in upper right if this is a start state
-                is_start = any(jnp.array_equal(agent_loc, start_loc) for start_loc in basic_env._start_locs)
-                if is_start and not is_obstacle and not is_goal:
-                    ax.text(col + 0.85, plot_row + 0.85, 'S', ha='center', va='center', 
-                           fontsize=label_fontsize, color='green', weight='bold', zorder=11)
-        
-        # Add green outlines for stopping conditions in a second pass (to ensure they're on top)
-        for row in range(H):
-            for col in range(W):
-                plot_row = H - 1 - row
-                if stop_grid[option_idx, row, col] == 1:
-                    rect_outline = patches.Rectangle((col, plot_row), 1, 1, linewidth=edge_linewidth * 3, 
-                                                     edgecolor='lime', facecolor='none', zorder=10)
-                    ax.add_patch(rect_outline)
+        if has_key is not None and not has_key and hasattr(basic_env, 'fixed_key_loc'):
+            key_row, key_col = basic_env.fixed_key_loc
+            plot_key_row = H - 1 - key_row
+            ax.text(key_col + 0.5, plot_key_row + 0.5, 'K', ha='center', va='center', 
+                    fontsize=label_fontsize * 1.2, color='gold', weight='bold', zorder=15,
+                    bbox=dict(boxstyle='circle', facecolor='black', edgecolor='gold', linewidth=1.5))
 
         ax.set_xlim(0, W)
         ax.set_ylim(0, H)
         ax.set_aspect('equal')
         ax.set_xticks([])
         ax.set_yticks([])
-        ax.set_xticklabels([])
-        ax.set_yticklabels([])
-        title_fontsize = max(10, min(16, 100 / max_dim))
-        ax.set_title(f'Option {option_idx} Stopping Values', fontsize=title_fontsize)
-        ax.grid(True, alpha=0.3, linewidth=edge_linewidth * 0.5)
+        ax.set_title(f'Option {option_idx} Q-Values', fontsize=max(10, min(16, 100 / max_dim)))
 
     for i in range(n_options, len(axes_flat)):
         axes_flat[i].axis('off')
-
-    fig.suptitle(f'Stopping Values for {config["ENV_NAME"]}. \n Stopping Condition: {config["STOPPING_CONDITION"]} \n Bonus weight: {config["BONUS_WEIGHT"]} \n Use last hidden layer: {config["USE_LAST_HIDDEN"]}', fontsize=max(12, min(20, 120 / max_dim)))
+        
+    # [Rest of saving logic remains the same]
+    if has_key is not None:
+        key_state_str = "with key" if has_key else "without key"
+        title_suffix = f" ({key_state_str})"
+    else:
+        title_suffix = ""
+    
+    fig.suptitle(f'Option Action Values for {config["ENV_NAME"]}{title_suffix}', fontsize=max(12, min(20, 120 / max_dim)))
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
     os.makedirs(save_dir, exist_ok=True)
-    save_path = os.path.join(save_dir, f'stopping_vals_{config["ENV_NAME"]}.png')
+    
+    if has_key is not None:
+        key_suffix = "_with_key" if has_key else "_without_key"
+        save_path = os.path.join(save_dir, f'q_vals_{config["ENV_NAME"]}{key_suffix}.png')
+    else:
+        save_path = os.path.join(save_dir, f'q_vals_{config["ENV_NAME"]}.png')
+    
     plt.savefig(save_path, dpi=300, bbox_inches='tight')
-
     plt.close(fig)
-
 
 if __name__ == "__main__":
     # ------------------
@@ -1109,6 +1225,7 @@ if __name__ == "__main__":
             "NUM_UPDATES": hypers["num_updates"],
             "GAMMA": 0.99,
             "LEARNING_RATE": hypers.get("learning_rate", 1e-4),
+            "NETWORK_NAME": hypers["network_name"],
             "OPT": hypers.get("opt", "adam"),
             "LR_LINEAR_DECAY": hypers.get("lr_linear_decay", False),
             "BATCH_SIZE": hypers.get("batch_size", 32),
@@ -1253,7 +1370,7 @@ if __name__ == "__main__":
             base_env, _ = make(config["ENV_NAME"])
             if isinstance(base_env, Gridworld):
                 plot_qvals(plotting_weights, config, save_dir)
-                plot_stopping_values(plotting_weights, config, save_dir)
+                # plot_stopping_values(plotting_weights, config, save_dir)
                 # plot_rep_heatmaps(plotting_weights, config, save_dir) # This would need to be adapted for options
 
         # Save network weights

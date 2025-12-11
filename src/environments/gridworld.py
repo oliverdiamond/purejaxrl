@@ -665,3 +665,19 @@ class Maze9x9RGBWithKey(KeyCollectionMixin, Maze9x9Mixin, GridworldRGB):
     @property
     def name(self) -> str:
         return "Maze9x9RGBWithKey"
+
+class EmptyRoomMixin:
+    """Mixin for an empty room with no obstacles."""
+    H: int  # Type hint for mixin - provided by Gridworld base class
+    W: int  # Type hint for mixin - provided by Gridworld base class
+    
+    def _get_obstacles_map(self):
+        return jnp.zeros([self.H, self.W])
+
+class EmptyRoom7x7RGBWithKey(KeyCollectionMixin, EmptyRoomMixin, GridworldRGB):
+    def __init__(self, fixed_key_loc=jnp.array([0, 0])):
+        super().__init__(H=7, W=7, goal_loc=jnp.array([4, 4]), fixed_key_loc=fixed_key_loc, use_fixed_key_loc=True)
+
+    @property
+    def name(self) -> str:
+        return "EmptyRoom7x7RGBWithKey"

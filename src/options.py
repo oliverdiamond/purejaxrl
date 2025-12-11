@@ -585,6 +585,11 @@ def _get_static_locs(basic_env):
     penalty_locs = []
     start_locs = []
     
+    # Get key location if it exists
+    key_loc = None
+    if hasattr(basic_env, 'fixed_key_loc'):
+        key_loc = (int(basic_env.fixed_key_loc[0]), int(basic_env.fixed_key_loc[1]))
+    
     # Identify key locations once
     for r in range(H):
         for c in range(W):
@@ -593,13 +598,14 @@ def _get_static_locs(basic_env):
             elif basic_env._penalty_map[r, c] != 0.0 and not np.array_equal([r,c], basic_env.goal_loc):
                 penalty_locs.append((r, c))
             
-            # Start locations
+            # Start locations (exclude key location)
             agent_loc = jnp.array([r, c])
             is_start = any(jnp.array_equal(agent_loc, sl) for sl in basic_env._start_locs)
             if is_start and basic_env._obstacles_map[r, c] != 1.0:
-                start_locs.append((r, c))
+                if key_loc is None or (r, c) != key_loc:
+                    start_locs.append((r, c))
                 
-    return obstacle_locs, penalty_locs, start_locs
+    return obstacle_locs, penalty_locs, start_locs, key_loc
 
 def plot_stopping_values(network_params, config, save_dir):
     """Visualizes stopping values for all locations in the maze for each option."""
@@ -619,7 +625,7 @@ def _plot_stopping_values_single(network_params, config, save_dir, basic_env, en
     W = basic_env.W
     
     # 1. Pre-calculate static lists
-    obstacle_locs, penalty_locs, start_locs_list = _get_static_locs(basic_env)
+    obstacle_locs, penalty_locs, start_locs_list, key_loc = _get_static_locs(basic_env)
 
     # Determine n_options from network_params
     n_options = jax.tree_util.tree_leaves(network_params)[0].shape[0]
@@ -815,16 +821,15 @@ def _plot_stopping_values_single(network_params, config, save_dir, basic_env, en
         # Starts
         for r, c in start_locs_list:
             plot_row = H - 1 - r
-            ax.text(c + 0.85, plot_row + 0.85, 'S', ha='center', va='center', 
-                   fontsize=label_fontsize, color='green', weight='bold', zorder=11)
+            ax.text(c + 0.85, plot_row + 0.85, 's', ha='center', va='center', 
+                   fontsize=label_fontsize * 0.6, color='green', weight='bold', zorder=11)
                    
         # Key
         if has_key is not None and not has_key and hasattr(basic_env, 'fixed_key_loc'):
             key_row, key_col = basic_env.fixed_key_loc
             plot_key_row = H - 1 - key_row
-            ax.text(key_col + 0.5, plot_key_row + 0.5, 'K', ha='center', va='center', 
-                    fontsize=label_fontsize * 1.2, color='gold', weight='bold', zorder=15,
-                    bbox=dict(boxstyle='circle', facecolor='black', edgecolor='gold', linewidth=1.5))
+            ax.text(key_col + 0.85, plot_key_row + 0.85, 'k', ha='center', va='center', 
+                    fontsize=label_fontsize * 0.6, color='gold', weight='bold', zorder=15)
 
         ax.set_xlim(0, W)
         ax.set_ylim(0, H)
@@ -879,7 +884,7 @@ def _plot_qvals_single(network_params, config, save_dir, basic_env, env_params, 
     W = basic_env.W
     
     # 1. Pre-calculate static lists
-    obstacle_locs, penalty_locs, start_locs_list = _get_static_locs(basic_env)
+    obstacle_locs, penalty_locs, start_locs_list, key_loc = _get_static_locs(basic_env)
 
     # Determine n_options from network_params
     n_options = jax.tree_util.tree_leaves(network_params)[0].shape[0]
@@ -1077,7 +1082,7 @@ def _plot_qvals_single(network_params, config, save_dir, basic_env, env_params, 
         if quiver_X:
             ax.quiver(quiver_X, quiver_Y, quiver_U, quiver_V, 
                      color='orange', scale=None, scale_units='xy', angles='xy',
-                     width=0.015, headwidth=4, headlength=4, pivot='mid', zorder=12, alpha=0.8)
+                     width=0.0075, headwidth=2, headlength=2, pivot='mid', zorder=12, alpha=0.8)
 
         # Overlays
         stop_rows, stop_cols = np.where(stop_grid[option_idx] == 1)
@@ -1093,14 +1098,13 @@ def _plot_qvals_single(network_params, config, save_dir, basic_env, env_params, 
             
         for r, c in start_locs_list:
             plot_row = H - 1 - r
-            ax.text(c + 0.85, plot_row + 0.85, 'S', ha='center', va='center', fontsize=label_fontsize, color='green', weight='bold', zorder=11)
+            ax.text(c + 0.85, plot_row + 0.85, 's', ha='center', va='center', fontsize=label_fontsize * 0.6, color='green', weight='bold', zorder=11)
 
         if has_key is not None and not has_key and hasattr(basic_env, 'fixed_key_loc'):
             key_row, key_col = basic_env.fixed_key_loc
             plot_key_row = H - 1 - key_row
-            ax.text(key_col + 0.5, plot_key_row + 0.5, 'K', ha='center', va='center', 
-                    fontsize=label_fontsize * 1.2, color='gold', weight='bold', zorder=15,
-                    bbox=dict(boxstyle='circle', facecolor='black', edgecolor='gold', linewidth=1.5))
+            ax.text(key_col + 0.85, plot_key_row + 0.85, 'k', ha='center', va='center', 
+                    fontsize=label_fontsize * 0.6, color='gold', weight='bold', zorder=15)
 
         ax.set_xlim(0, W)
         ax.set_ylim(0, H)

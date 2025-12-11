@@ -859,10 +859,9 @@ def _plot_qvals_single(network_params, config, save_dir, network, basic_env, env
     if has_key is not None and not has_key and hasattr(basic_env, 'fixed_key_loc'):
         key_row, key_col = basic_env.fixed_key_loc
         plot_key_row = H - 1 - key_row
-        # Draw a yellow 'K' for key location
-        ax.text(key_col + 0.5, plot_key_row + 0.5, 'K', ha='center', va='center', 
-                fontsize=label_fontsize * 1.5, color='gold', weight='bold', zorder=15,
-                bbox=dict(boxstyle='circle', facecolor='black', edgecolor='gold', linewidth=2))
+        # Draw a small gold 'k' in upper right corner
+        ax.text(key_col + 0.85, plot_key_row + 0.85, 'k', ha='center', va='center', 
+                fontsize=label_fontsize * 0.6, color='gold', weight='bold', zorder=15)
     
     plt.tight_layout()
     os.makedirs(save_dir, exist_ok=True)
@@ -923,6 +922,11 @@ def _plot_feature_heatmaps_single(network_params, config, save_dir, method_name,
     penalty_locs = []
     start_locs_list = []
     
+    # Get key location if it exists
+    key_loc = None
+    if hasattr(basic_env, 'fixed_key_loc'):
+        key_loc = (int(basic_env.fixed_key_loc[0]), int(basic_env.fixed_key_loc[1]))
+    
     # We use basic numpy/python here as it's run only once per figure
     for r in range(H):
         for c in range(W):
@@ -931,11 +935,12 @@ def _plot_feature_heatmaps_single(network_params, config, save_dir, method_name,
             elif basic_env._penalty_map[r, c] != 0.0 and not np.array_equal([r,c], basic_env.goal_loc):
                 penalty_locs.append((r, c))
             
-            # Check start locations
+            # Check start locations (exclude key location)
             agent_loc = jnp.array([r, c])
             is_start = any(jnp.array_equal(agent_loc, start_loc) for start_loc in basic_env._start_locs)
             if is_start and basic_env._obstacles_map[r, c] != 1.0:
-                start_locs_list.append((r, c))
+                if key_loc is None or (r, c) != key_loc:
+                    start_locs_list.append((r, c))
 
     # --- 2. VECTORIZED INFERENCE ---
     # Call your existing helper function
@@ -1052,16 +1057,15 @@ def _plot_feature_heatmaps_single(network_params, config, save_dir, method_name,
         # Start Markers
         for r, c in start_locs_list:
             plot_row = H - 1 - r
-            ax.text(c + 0.85, plot_row + 0.85, 'S', ha='center', va='center', 
-                   fontsize=value_fontsize + 2, color='green', weight='bold', zorder=11)
+            ax.text(c + 0.85, plot_row + 0.85, 's', ha='center', va='center', 
+                   fontsize=value_fontsize * 0.6, color='green', weight='bold', zorder=11)
         
         # Key Marker
         if has_key is not None and not has_key and hasattr(basic_env, 'fixed_key_loc'):
             key_row, key_col = basic_env.fixed_key_loc
             plot_key_row = H - 1 - key_row
-            ax.text(key_col + 0.5, plot_key_row + 0.5, 'K', ha='center', va='center', 
-                    fontsize=value_fontsize + 4, color='gold', weight='bold', zorder=15,
-                    bbox=dict(boxstyle='circle', facecolor='black', edgecolor='gold', linewidth=1.5))
+            ax.text(key_col + 0.85, plot_key_row + 0.85, 'k', ha='center', va='center', 
+                    fontsize=value_fontsize * 0.6, color='gold', weight='bold', zorder=15)
 
         ax.set_xlim(0, W)
         ax.set_ylim(0, H)

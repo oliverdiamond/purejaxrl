@@ -334,6 +334,77 @@ class QNetFTA(nn.Module):
 
         return last_hidden
 
+class QNet2Bernoulli(nn.Module):
+    """
+    Implements the Bernoulli Bottleneck using QNet2 architecture style.
+    It replaces the standard Dense+ReLU in the middle with Dense+Sigmoid+STE.
+    """
+    action_dim: int
+    conv1_dim: int = 16   # Matches QNet2
+    conv2_dim: int = 32   # Matches QNet2
+    dense_dim: int = 256  # Matches QNet2
+
+    def setup(self):
+        w_conv_init = nn.initializers.variance_scaling(
+            scale=math.sqrt(2), mode='fan_avg', distribution='uniform')
+        w_init = nn.initializers.variance_scaling(
+            scale=1.0, mode='fan_avg', distribution='uniform')
+
+        # 1. Conv Backbone (Same as QNet2)
+        self.conv_backbone = nn.Sequential([
+            nn.Conv(features=self.conv1_dim, kernel_size=(3, 3), strides=(1, 1), padding='SAME', kernel_init=w_conv_init),
+            nn.relu,
+            nn.Conv(features=self.conv2_dim, kernel_size=(3, 3), strides=(2, 2), padding='SAME', kernel_init=w_conv_init),
+            nn.relu
+        ])
+
+        # 2. Encoder to Logits
+        # This replaces the first Dense layer of QNet2's head, but outputs logits for sigmoid
+        self.encoder_linear = nn.Dense(self.dense_dim, kernel_init=w_init, name="encoder_linear")
+
+        # 3. Readout Head
+        # This maps the binary features to Q-values. 
+        # Note: In QNet2, there was a ReLU after the dense_dim. Here, the activation IS the bottleneck.
+        # We project straight to action_dim.
+        self.head = nn.Dense(self.action_dim, kernel_init=w_init, name="output")
+
+    def get_bernoulli_features(self, x: jnp.ndarray):
+        # 1. Conv Backbone
+        x = self.conv_backbone(x)
+        x = x.reshape((x.shape[0], -1))
+        
+        # 2. Logits
+        logits = self.encoder_linear(x)
+        probs = nn.sigmoid(logits)
+        
+        # 3. Straight-Through Estimator (STE)
+        # Forward: Binary (0 or 1)
+        # Backward: Gradient of Sigmoid (probs)
+        binary_mask = (probs > 0.5).astype(jnp.float32)
+        features = probs + jax.lax.stop_gradient(binary_mask - probs)
+        
+        return features
+
+    def __call__(self, x: jnp.ndarray):
+        features = self.get_bernoulli_features(x)
+        q = self.head(features)
+        return q
+
+    def get_activations(self, x: jnp.ndarray) -> dict[str, jnp.ndarray]:
+        features = self.get_bernoulli_features(x)
+        q = self.head(features)
+        
+        return {
+            "rep": features, # Strictly 0 or 1
+            "q_values": q
+        }
+
+    def get_features(self, x: jnp.ndarray) -> jnp.ndarray:
+        return self.get_bernoulli_features(x)
+    
+    def get_last_hidden(self, x: jnp.ndarray) -> jnp.ndarray:
+        return self.get_features(x)
+
 def make_network(config, action_dim):
     """Returns the appropriate network based on the configuration."""
     if config["NETWORK_NAME"] == "QNet":
@@ -358,9 +429,14 @@ def make_network(config, action_dim):
                 fta_upper_bound=config["FTA_UPPER_BOUND"]
             )
     elif config["NETWORK_NAME"] == "QNet2":
-        return QNet2(
-            action_dim=action_dim
-        )
+        if config["ACTIVATION"] == "relu":
+            return QNet2(
+                action_dim=action_dim
+            )
+        elif config["ACTIVATION"] == "bernoulli":
+            return QNet2Bernoulli(
+                action_dim=action_dim
+            )
     elif config["ACTIVATION"] == "linear":
         return QNetLinear(
             action_dim=action_dim
@@ -512,17 +588,24 @@ def make_train(config):
                 )
 
                 def _loss_fn(params):
-                    q_vals = network.apply(
+                    activations = network.apply(
                         params, 
-                        learn_batch.obs
-                    )  # (batch_size, num_actions)
+                        learn_batch.obs,
+                        method=network.get_activations
+                    )
+                    q_vals = activations["q_values"]
+                    features = activations["rep"]
                     chosen_action_qvals = jnp.take_along_axis(
                         q_vals, # type: ignore
                         jnp.expand_dims(learn_batch.action, axis=-1),
                         axis=-1,
                     ).squeeze(axis=-1)
-                    return jnp.mean((chosen_action_qvals - target) ** 2)
-
+                    loss_q = jnp.mean((chosen_action_qvals - target) ** 2)
+                    
+                    # MODIFIED: Add sparsity penalty if defined in config
+                    loss_sparsity = config["SPARSITY_COEF"] * jnp.mean(features)
+                    
+                    return loss_q + loss_sparsity
                 loss, grads = jax.value_and_grad(_loss_fn)(train_state.params)
                 train_state = train_state.apply_gradients(grads=grads)
                 train_state = train_state.replace(n_updates=train_state.n_updates + 1)
@@ -1207,6 +1290,7 @@ if __name__ == "__main__":
             "REP_DIM": hypers.get("rep_dim", 32),
             "HEAD_HIDDEN_DIM": hypers.get("head_hidden_dim", 64),
             "ACTIVATION": hypers.get("activation", "relu"),
+            "SPARSITY_COEF": hypers.get("sparsity_coef", 0.0),
             "VERBOSE": args.verbose,
         }
         if config["ACTIVATION"] == "fta":

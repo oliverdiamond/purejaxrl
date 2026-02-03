@@ -3,11 +3,12 @@
     "save_weights": true,
     "wandb_mode": "disabled",
     "metaParameters": {
-        "total_timesteps": 1000,
+        "total_timesteps": 200000,
         "seed": 0,
         "n_seeds": 1,
-        "env_name": "Maze9x9RGBWithKey",
+        "env_name": ["EmptyRoom7x7RGBWithKey"],
+        "activation": "bernoulli",        
         "network_name": "QNet2",
-        "activation": "relu"
+        "sparsity_coef": [0.0]
     }
 }

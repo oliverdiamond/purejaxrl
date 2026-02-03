@@ -383,24 +383,25 @@ class QNet2Bernoulli(nn.Module):
         binary_mask = (probs > 0.5).astype(jnp.float32)
         features = probs + jax.lax.stop_gradient(binary_mask - probs)
         
-        return features
+        return features, probs
 
     def __call__(self, x: jnp.ndarray):
-        features = self.get_bernoulli_features(x)
+        features, _ = self.get_bernoulli_features(x)
         q = self.head(features)
         return q
 
     def get_activations(self, x: jnp.ndarray) -> dict[str, jnp.ndarray]:
-        features = self.get_bernoulli_features(x)
+        features, probs = self.get_bernoulli_features(x)
         q = self.head(features)
         
         return {
             "rep": features, # Strictly 0 or 1
-            "q_values": q
+            "q_values": q,
+            "probs": probs  # Probabilities before STE
         }
 
     def get_features(self, x: jnp.ndarray) -> jnp.ndarray:
-        return self.get_bernoulli_features(x)
+        return self.get_bernoulli_features(x)[0]
     
     def get_last_hidden(self, x: jnp.ndarray) -> jnp.ndarray:
         return self.get_features(x)
@@ -595,6 +596,7 @@ def make_train(config):
                     )
                     q_vals = activations["q_values"]
                     features = activations["rep"]
+                    probs = activations["probs"]
                     chosen_action_qvals = jnp.take_along_axis(
                         q_vals, # type: ignore
                         jnp.expand_dims(learn_batch.action, axis=-1),
@@ -603,13 +605,14 @@ def make_train(config):
                     loss_q = jnp.mean((chosen_action_qvals - target) ** 2)
                     
                     # MODIFIED: Add sparsity penalty if defined in config
-                    loss_sparsity = config["SPARSITY_COEF"] * jnp.mean(features)
+                    loss_sparsity = config["SPARSITY_COEF"] * jnp.mean(probs)
                     
-                    return loss_q + loss_sparsity
-                loss, grads = jax.value_and_grad(_loss_fn)(train_state.params)
+                    return loss_q + loss_sparsity, features
+                (loss, features), grads = jax.value_and_grad(_loss_fn, has_aux=True)(train_state.params)
+                alive_percent = jnp.mean(features)
                 train_state = train_state.apply_gradients(grads=grads)
                 train_state = train_state.replace(n_updates=train_state.n_updates + 1)
-                return train_state, loss
+                return train_state, loss, alive_percent
 
             rng, _rng = jax.random.split(rng)
             is_learn_time = (
@@ -621,10 +624,10 @@ def make_train(config):
                     train_state.timesteps % config["TRAINING_INTERVAL"] == 0
                 )  # training interval
             )
-            train_state, loss = jax.lax.cond(
+            train_state, loss, alive_percent = jax.lax.cond(
                 is_learn_time,
                 lambda train_state, rng: _learn_phase(train_state, rng),
-                lambda train_state, rng: (train_state, jnp.array(0.0)),  # do nothing
+                lambda train_state, rng: (train_state, jnp.array(0.0), jnp.array(0.0)),  # do nothing
                 train_state,
                 _rng,
             )
@@ -650,6 +653,7 @@ def make_train(config):
                 "episode_step": info["episode_step"],
                 "done": info["done"],
                 "loss": loss,
+                "alive_percent": alive_percent,
             }
 
             # report on wandb if required
@@ -673,37 +677,39 @@ def make_train(config):
                 )
 
             if config.get("VERBOSE"):
-
-                # def callback(info):
-                #     returns = info["reward_sum"][
-                #         info["done"]
-                #     ]
-                #     steps = info["episode_step"][
-                #         info["done"]
-                #     ]
-                #     timesteps = info["timestep"][info["done"]]
-                #     loss = info["loss"][info["done"]]
-
-                #     for t in range(len(timesteps)):
-                #         print(
-                #             " ".join(
-                #                 [
-                #                     f"global step={timesteps[t]},",
-                #                     f"return={returns[t]}",
-                #                     f"episode_step={steps[t]}",
-                #                     f"loss={loss[t]:.4f}",
-                #                 ]
-                #             )
-                #         )
                 def callback(info):
-                    if info["timestep"][0] % 1000 == 0:
+                    returns = info["reward_sum"][
+                        info["done"]
+                    ]
+                    steps = info["episode_step"][
+                        info["done"]
+                    ]
+                    timesteps = info["timestep"][info["done"]]
+                    loss = info["loss"]
+                    alive_pct = float(info['alive_percent'])
+
+                    for t in range(len(timesteps)):
                         print(
                             " ".join(
                                 [
-                                    f"timestep={info['timestep'][0]},"
+                                    f"global step={timesteps[t]},",
+                                    f"return={returns[t]}",
+                                    f"episode_step={steps[t]}",
+                                    f"loss={loss:.4f}",
+                                    f"alive_percent={alive_pct:.4f}"
                                 ]
                             )
                         )
+                # def callback(info):
+                #     if info["timestep"][0] % 1000 == 0:
+                #         print(
+                #             " ".join(
+                #                 [
+                #                     f"timestep={info['timestep'][0]},",
+                #                     f"alive_percent={info['alive_percent']:.4f}"
+                #                 ]
+                #             )
+                #         )
 
                 jax.debug.callback(callback, metric)
 

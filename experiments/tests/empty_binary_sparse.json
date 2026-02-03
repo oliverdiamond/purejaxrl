@@ -1,0 +1,14 @@
+{
+    "agent": "dqn",
+    "save_weights": true,
+    "wandb_mode": "disabled",
+    "metaParameters": {
+        "total_timesteps": 200000,
+        "seed": 0,
+        "n_seeds": 1,
+        "env_name": ["EmptyRoom7x7RGBWithKeySparseReward"],
+        "activation": "bernoulli",        
+        "network_name": "QNet2",
+        "sparsity_coef": [1e-6, 3e-6, 1e-5, 3e-5, 1e-4, 3e-4, 1e-3]
+    }
+}

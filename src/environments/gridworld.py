@@ -347,6 +347,14 @@ class TwoRoomsPaperMixin:
     
     def _get_start_locs(self):
         return jnp.array([[2, 0]])
+    
+class EmptyRoomMixin:
+    """Mixin for an empty room with no obstacles."""
+    H: int  # Type hint for mixin - provided by Gridworld base class
+    W: int  # Type hint for mixin - provided by Gridworld base class
+    
+    def _get_obstacles_map(self):
+        return jnp.zeros([self.H, self.W])
 
 class RandomTransitionsMixin:
     """Mixin that adds stochastic transitions (1/3 probability of random action)."""
@@ -593,6 +601,181 @@ class KeyCollectionMixin:
 
         return obs
 
+class KeyCollectionMixinSparseReward:
+    """Mixin that requires collecting a key before reaching the goal with sparse rewards (1 at goal, 0 otherwise)."""
+    H: int  # Type hint for mixin - provided by Gridworld base class
+    W: int  # Type hint for mixin - provided by Gridworld base class
+    _obstacles_map: jax.Array  # Type hint for mixin - provided by Gridworld base class
+    _rgb_template: jax.Array  # Type hint for mixin - provided by GridworldRGB base class
+    goal_loc: jax.Array  # Type hint for mixin - provided by Gridworld base class
+    _penalty_map: jax.Array  # Type hint for mixin - provided by Gridworld base class
+    goal_reward: float  # Type hint for mixin - provided by Gridworld base class
+    directions: jax.Array  # Type hint for mixin - provided by Gridworld base class
+    _start_locs: jax.Array  # Type hint for mixin - provided by Gridworld base class
+    fixed_key_loc: jax.Array  # Type hint for mixin - optional fixed key location
+    use_fixed_key_loc: bool  # Type hint for mixin - whether to use fixed key location
+    def __init__(self, fixed_key_loc: jax.Array, use_fixed_key_loc: bool = False, **kwargs):
+        # 1. Initialize Superclass (Gridworld)
+        super().__init__(**kwargs) 
+        
+        # 2. Set Mixin variables
+        self.fixed_key_loc = fixed_key_loc
+        self.use_fixed_key_loc = use_fixed_key_loc
+        
+        # 3. RE-CALCULATE start locations. 
+        # We must do this here because the superclass __init__ called _get_start_locs 
+        # BEFORE we set self.use_fixed_key_loc.
+        self._start_locs = self._get_start_locs()
+
+    def _get_start_locs(self):
+        """
+        Get all valid starting locations.
+        Logic: Valid = (Not Obstacle) AND (Not Goal) AND (Not Fixed Key Loc).
+        """
+        # 1. Basic mask: Not a wall
+        valid_locs_mask = self._obstacles_map == 0.0
+        
+        # 2. Exclude Goal
+        valid_locs_mask = valid_locs_mask.at[self.goal_loc[0], self.goal_loc[1]].set(False)
+        
+        # 3. Exclude Fixed Key Location (if using fixed key)
+        # We use Python 'if' because this runs during initialization (not JIT compiled)
+        if hasattr(self, 'use_fixed_key_loc') and self.use_fixed_key_loc:
+            valid_locs_mask = valid_locs_mask.at[self.fixed_key_loc[0], self.fixed_key_loc[1]].set(False)
+        valid_locs = jnp.argwhere(valid_locs_mask)
+        return valid_locs
+
+    def reset_env(
+        self, key: jax.Array, params: EnvParams
+        ) -> tuple[jax.Array, EnvState]:
+        """Reset environment state by sampling distinct start loc and key loc."""
+        key, subkey = jax.random.split(key)
+        
+        num_start_locs = self._start_locs.shape[0]
+
+        # Branch A: Use Fixed Key
+        # Agent spawns anywhere in _start_locs (which already excludes the key loc)
+        def reset_fixed_key():
+            idx = jax.random.randint(subkey, (), 0, num_start_locs)
+            a_loc = self._start_locs[idx]
+            k_loc = self.fixed_key_loc
+            return a_loc, k_loc
+
+        # Branch B: Use Random Key
+        # We need 2 distinct locations from _start_locs.
+        # We sample 2 indices without replacement.
+        def reset_random_key():
+            # shape=(2,) ensures we get two indices. replace=False ensures they are unique.
+            indices = jax.random.choice(subkey, num_start_locs, shape=(2,), replace=False)
+            a_loc = self._start_locs[indices[0]] # First index for Agent
+            k_loc = self._start_locs[indices[1]] # Second index for Key
+            return a_loc, k_loc
+
+        # Execute logic
+        start_loc, key_loc = jax.lax.cond(
+            self.use_fixed_key_loc,
+            reset_fixed_key,
+            reset_random_key
+        )
+
+        state = EnvState(
+            time=0,
+            agent_loc=start_loc,
+            has_key=jnp.array(False),
+            key_loc=key_loc,
+        )
+
+        return self.get_obs(state, params), state
+    
+    def step_env(
+        self,
+        key: jax.Array,
+        state: EnvState,
+        action: int | float | jax.Array,
+        params: EnvParams,
+    ) -> tuple[jax.Array, EnvState, jax.Array, jax.Array, dict[Any, Any]]:
+        """Perform single timestep state transition with key collection logic and sparse rewards."""
+        # Get new agent location based on action
+        agent_loc_new = state.agent_loc + self.directions[action]
+        agent_loc_new = jnp.array([
+            jnp.clip(agent_loc_new[0], 0, self.H - 1),
+            jnp.clip(agent_loc_new[1], 0, self.W - 1)
+        ])
+        on_obstacle = self._obstacles_map[agent_loc_new[0], agent_loc_new[1]] == 1.0
+        agent_loc_new = jax.lax.select(
+            on_obstacle, state.agent_loc, agent_loc_new
+        )
+        
+        # Check if agent collected the key
+        collected_key = jnp.array_equal(agent_loc_new, state.key_loc)
+        has_key = jnp.logical_or(state.has_key, collected_key)
+
+        state = EnvState(
+            time=state.time + 1,
+            agent_loc=agent_loc_new,
+            has_key=has_key,
+            key_loc=state.key_loc,
+        )
+
+        # Calculate reward - only give reward of 1 when reaching goal with key, 0 otherwise
+        at_goal = jnp.array_equal(state.agent_loc, self.goal_loc)
+        goal_reward = jnp.asarray(
+            jnp.logical_and(at_goal, state.has_key),
+            dtype=jnp.float32,
+        )
+        reward = goal_reward
+
+        done = self.is_terminal(state, params)  # type: ignore
+        truncated = self.is_truncated(state, params)  # type: ignore
+
+        return (
+            jax.lax.stop_gradient(self.get_obs(state, params=params)),  # type: ignore
+            jax.lax.stop_gradient(state),
+            reward,
+            done,
+            {"truncated": truncated}
+        )
+    
+    def is_terminal(self, state: EnvState, params: EnvParams) -> jax.Array:
+        """Check whether goal state (with key) or episode timeout is reached."""
+        # Check number of steps in episode termination condition
+        done_steps = self.is_truncated(state, params)  # type: ignore
+        # Check if agent has found the goal AND has the key
+        at_goal = jnp.array_equal(state.agent_loc, self.goal_loc)
+        done_goal = jnp.logical_and(at_goal, state.has_key)
+        
+        done = jnp.logical_or(done_goal, done_steps)
+        return done
+    
+    def get_obs(
+        self,
+        state: EnvState,
+        params: EnvParams,
+        key = None,
+    ) -> jax.Array:
+        """Return observation with key location and agent color based on key possession."""
+        # N x N image with 3 Channels: [Wall/Key, Empty, Agent]
+        obs = self._rgb_template.copy()
+        
+        # Set key location (use red/wall channel if key not collected)
+        key_visible = jnp.logical_not(state.has_key)
+        key_color = jnp.where(
+            key_visible,
+            jnp.array([0.5, 0.0, 0.0]),  # Dark red (0.5) if key not collected
+            jnp.array([0.0, 1.0, 0.0])   # Green if key collected (like empty space)
+        )
+        obs = obs.at[state.key_loc[0], state.key_loc[1]].set(key_color)
+        
+        # Set agent location - color depends on whether they have the key
+        agent_color = jnp.where(
+            state.has_key,
+            jnp.array([0.0, 0.0, 0.5]),  # Dark blue if has key
+            jnp.array([0.0, 0.0, 1.0])   # Bright blue if no key
+        )
+        obs = obs.at[state.agent_loc[0], state.agent_loc[1]].set(agent_color)
+
+        return obs
+
 class MazeRGB(MazeMixin, GridworldRGB):
     def __init__(self):
         super().__init__(H=15, W=15, goal_loc=jnp.array([9, 9]))
@@ -652,7 +835,7 @@ class TwoRoomsPaperRandom(RandomTransitionsMixin, TwoRoomsPaperMixin, GridworldO
 
 class MazeRGBWithKey(KeyCollectionMixin, MazeMixin, GridworldRGB):
     def __init__(self, fixed_key_loc=jnp.array([3, 3])):
-        super().__init__(H=15, W=15, goal_loc=jnp.array([9, 9]), fixed_key_loc=fixed_key_loc, use_fixed_key_loc=True)
+        super().__init__(H=15, W=15, goal_loc=jnp.array([9, 9]), fixed_key_loc=fixed_key_loc, use_fixed_key_loc=True, goal_reward=0.0)
 
     @property
     def name(self) -> str:
@@ -660,24 +843,24 @@ class MazeRGBWithKey(KeyCollectionMixin, MazeMixin, GridworldRGB):
 
 class Maze9x9RGBWithKey(KeyCollectionMixin, Maze9x9Mixin, GridworldRGB):
     def __init__(self, fixed_key_loc=jnp.array([1, 1])):
-        super().__init__(H=9, W=9, goal_loc=jnp.array([5, 5]), fixed_key_loc=fixed_key_loc, use_fixed_key_loc=True)
+        super().__init__(H=9, W=9, goal_loc=jnp.array([5, 5]), fixed_key_loc=fixed_key_loc, use_fixed_key_loc=True, goal_reward=0.0)
 
     @property
     def name(self) -> str:
         return "Maze9x9RGBWithKey"
 
-class EmptyRoomMixin:
-    """Mixin for an empty room with no obstacles."""
-    H: int  # Type hint for mixin - provided by Gridworld base class
-    W: int  # Type hint for mixin - provided by Gridworld base class
-    
-    def _get_obstacles_map(self):
-        return jnp.zeros([self.H, self.W])
-
 class EmptyRoom7x7RGBWithKey(KeyCollectionMixin, EmptyRoomMixin, GridworldRGB):
     def __init__(self, fixed_key_loc=jnp.array([0, 0])):
-        super().__init__(H=7, W=7, goal_loc=jnp.array([4, 4]), fixed_key_loc=fixed_key_loc, use_fixed_key_loc=True)
+        super().__init__(H=7, W=7, goal_loc=jnp.array([6, 6]), fixed_key_loc=fixed_key_loc, use_fixed_key_loc=True, goal_reward=0.0)
 
     @property
     def name(self) -> str:
         return "EmptyRoom7x7RGBWithKey"
+
+class EmptyRoom7x7RGBWithKeySparseReward(KeyCollectionMixinSparseReward, EmptyRoomMixin, GridworldRGB):
+    def __init__(self, fixed_key_loc=jnp.array([0, 0])):
+        super().__init__(H=7, W=7, goal_loc=jnp.array([6, 6]), fixed_key_loc=fixed_key_loc, use_fixed_key_loc=True)
+
+    @property
+    def name(self) -> str:
+        return "EmptyRoom7x7RGBWithKeySparseReward"

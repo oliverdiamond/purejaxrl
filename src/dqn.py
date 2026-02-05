@@ -1031,45 +1031,39 @@ def _plot_feature_heatmaps(network_params, config, save_dir, method_name, title,
     has_two_keys = hasattr(basic_env, 'fixed_key_loc2') and hasattr(basic_env, 'use_fixed_key_loc')
     
     if has_two_keys and basic_env.use_fixed_key_loc:
-        # Two-key environment: plot for all four combinations
-        for has_key in [False, True]:
-            for has_key2 in [False, True]:
-                key1_suffix = "_key1" if has_key else "_nokey1"
-                key2_suffix = "_key2" if has_key2 else "_nokey2"
-                modified_filename = filename.replace('.png', f'{key1_suffix}{key2_suffix}.png')
-                key_state_str = f"key1={'Y' if has_key else 'N'}, key2={'Y' if has_key2 else 'N'}"
-                modified_title = f"{title} ({key_state_str})"
-                _plot_feature_heatmaps_single(
-                    network_params, config, save_dir, method_name, 
-                    modified_title, modified_filename, network, basic_env, env_params, has_key, has_key2
-                )
-    elif has_one_key and basic_env.use_fixed_key_loc:
-        # One-key environment: plot for both has_key=False and has_key=True
-        for has_key in [False, True]:
-            key_suffix = "_with_key" if has_key else "_without_key"
-            modified_filename = filename.replace('.png', f'{key_suffix}.png')
-            key_state_str = "with key" if has_key else "without key"
-            modified_title = f"{title} ({key_state_str})"
-            _plot_feature_heatmaps_single(
-                network_params, config, save_dir, method_name, 
-                modified_title, modified_filename, network, basic_env, env_params, has_key, None
-            )
-    else:
-        # Plot without key consideration
-        _plot_feature_heatmaps_single(
+        # Two-key environment: create single plot with 4 columns
+        key_combinations = [(False, False), (True, False), (False, True), (True, True)]
+        _plot_feature_heatmaps_grid(
             network_params, config, save_dir, method_name, 
-            title, filename, network, basic_env, env_params, None, None
+            title, filename, network, basic_env, env_params, key_combinations, two_keys=True
+        )
+    elif has_one_key and basic_env.use_fixed_key_loc:
+        # One-key environment: create single plot with 2 columns
+        key_combinations = [(False, None), (True, None)]
+        _plot_feature_heatmaps_grid(
+            network_params, config, save_dir, method_name, 
+            title, filename, network, basic_env, env_params, key_combinations, two_keys=False
+        )
+    else:
+        # Plot without key consideration - single column
+        key_combinations = [(None, None)]
+        _plot_feature_heatmaps_grid(
+            network_params, config, save_dir, method_name, 
+            title, filename, network, basic_env, env_params, key_combinations, two_keys=False
         )
 
-def _plot_feature_heatmaps_single(network_params, config, save_dir, method_name, title, filename, network, basic_env, env_params, has_key, has_key2=None):
+def _plot_feature_heatmaps_grid(network_params, config, save_dir, method_name, title, filename, network, basic_env, env_params, key_combinations, two_keys=False):
     """
-    Optimized heatmap plotter using vectorized inference and fast Matplotlib rendering.
+    Optimized heatmap plotter with key combinations as columns and features as rows.
+    
+    Args:
+        key_combinations: List of tuples (has_key, has_key2) or (has_key, None) for each column
+        two_keys: Boolean indicating if this is a two-key environment
     """
     H = basic_env.H
     W = basic_env.W
     
     # --- 1. OPTIMIZATION: Pre-calculate static map features ---
-    # Instead of scanning the grid 64+ times inside the plotting loop, scan it once here.
     obstacle_locs = []
     penalty_locs = []
     start_locs_list = []
@@ -1082,7 +1076,6 @@ def _plot_feature_heatmaps_single(network_params, config, save_dir, method_name,
     if hasattr(basic_env, 'fixed_key_loc2'):
         key_loc2 = (int(basic_env.fixed_key_loc2[0]), int(basic_env.fixed_key_loc2[1]))
     
-    # We use basic numpy/python here as it's run only once per figure
     for r in range(H):
         for c in range(W):
             if basic_env._obstacles_map[r, c] == 1.0:
@@ -1098,145 +1091,171 @@ def _plot_feature_heatmaps_single(network_params, config, save_dir, method_name,
                     (key_loc2 is None or (r, c) != key_loc2)):
                     start_locs_list.append((r, c))
 
-    # --- 2. VECTORIZED INFERENCE ---
-    # Call your existing helper function
-    obs_batch, locations, valid_mask = _get_all_observations_vectorized(basic_env, env_params, has_key, has_key2)
+    # --- 2. VECTORIZED INFERENCE FOR ALL KEY COMBINATIONS ---
+    print(f"Generating features for {len(key_combinations)} key combinations...")
+    all_feature_grids = []
+    valid_mask = None
     
-    if len(locations) == 0:
-        return
-    
-    # JIT the network application for maximum speed
-    apply_fn = jax.jit(lambda params, obs: network.apply(
-        params, obs, method=getattr(network, method_name)
-    ))
-    
-    # One single call to the GPU for all grid cells
-    features_all = apply_fn(network_params, obs_batch)
-    features_all = np.asarray(features_all)
-    
-    # Fill the 3D grid (H, W, Features)
-    feature_dim = features_all.shape[-1]
-    feature_grid = np.full((H, W, feature_dim), np.nan, dtype=np.float32)
-    
-    # Map linear batch results back to (H, W) grid
-    for idx, (row, col) in enumerate(locations):
-        feature_grid[row, col, :] = features_all[idx]
+    for has_key, has_key2 in key_combinations:
+        obs_batch, locations, valid_mask = _get_all_observations_vectorized(basic_env, env_params, has_key, has_key2)
+        
+        if len(locations) == 0:
+            return
+        
+        # JIT the network application for maximum speed
+        apply_fn = jax.jit(lambda params, obs: network.apply(
+            params, obs, method=getattr(network, method_name)
+        ))
+        
+        # One single call to the GPU for all grid cells
+        features_all = apply_fn(network_params, obs_batch)
+        features_all = np.asarray(features_all)
+        
+        # Fill the 3D grid (H, W, Features)
+        feature_dim = features_all.shape[-1]
+        feature_grid = np.full((H, W, feature_dim), np.nan, dtype=np.float32)
+        
+        # Map linear batch results back to (H, W) grid
+        for idx, (row, col) in enumerate(locations):
+            feature_grid[row, col, :] = features_all[idx]
+        
+        all_feature_grids.append(feature_grid)
 
     # --- 3. PLOTTING SETUP ---
-    if config["ACTIVATION"] == "fta" and method_name == "get_features":
-        cols = config["FTA_TILES"]
-    else:
-        cols = max(1, math.ceil(math.sqrt(feature_dim)))
-    rows = math.ceil(feature_dim / cols)
-
+    num_cols = len(key_combinations)  # One column per key combination
+    num_rows = feature_dim  # One row per feature
+    
     max_dim = max(H, W)
     cell_size = max(2.5, min(5.0, 18.0 / max(1, max_dim / 5)))
-    fig_width = cols * cell_size
-    fig_height = rows * cell_size
-    fig, axes = plt.subplots(rows, cols, figsize=(fig_width, fig_height), squeeze=False)
-    axes_flat = axes.flat
+    fig_width = num_cols * cell_size
+    fig_height = num_rows * cell_size
+    
+    fig, axes = plt.subplots(num_rows, num_cols, figsize=(fig_width, fig_height), squeeze=False)
 
     value_fontsize = max(6, min(14, 90 / max(1, max_dim)))
+    title_fontsize = max(8, min(12, 100 / max(1, max_dim)))
     edge_linewidth = max(0.3, min(1.0, 8 / max_dim))
 
     cmap = mcolors.LinearSegmentedColormap.from_list("feature_red", ["#fee5d9", "#fcae91", "#fb6a4a", "#de2d26", "#a50f15"])
 
+    # Prepare Mask (Obstacles + Goal)
+    obstacle_mask = basic_env._obstacles_map.astype(bool)
+    goal_mask = np.zeros((H, W), dtype=bool)
+    goal_mask[int(basic_env.goal_loc[0]), int(basic_env.goal_loc[1])] = True
+    mask = obstacle_mask | goal_mask
+
     # --- 4. FAST PLOTTING LOOP ---
     for feature_idx in range(feature_dim):
         print(f"Plotting feature {feature_idx + 1}/{feature_dim}...")
-        ax = axes_flat[feature_idx]
-        feature_values = feature_grid[:, :, feature_idx]
-
-        # Calculate range only on valid values
-        valid_values = feature_values[valid_mask]
-        if valid_values.size:
-            feature_min, feature_max = float(valid_values.min()), float(valid_values.max())
+        
+        # Calculate feature min/max across ALL key combinations for this feature
+        all_valid_values = []
+        for feature_grid in all_feature_grids:
+            feature_values_temp = feature_grid[:, :, feature_idx]
+            valid_values_temp = feature_values_temp[valid_mask]
+            if valid_values_temp.size:
+                all_valid_values.extend(valid_values_temp.flatten())
+        
+        if len(all_valid_values) > 0:
+            feature_min, feature_max = float(np.min(all_valid_values)), float(np.max(all_valid_values))
             feature_range = 1.0 if math.isclose(feature_max, feature_min) else feature_max - feature_min
         else:
             feature_min, feature_max, feature_range = 0.0, 1.0, 1.0
-
-        # Prepare Mask (Obstacles + Goal)
-        obstacle_mask = basic_env._obstacles_map.astype(bool)
-        goal_mask = np.zeros((H, W), dtype=bool)
-        goal_mask[int(basic_env.goal_loc[0]), int(basic_env.goal_loc[1])] = True
-        mask = obstacle_mask | goal_mask
-
-        # --- IMPORTANT TRANSFORMATION ---
-        # 1. Flip data Upside-Down (UD) because Gridworld (0,0) is top-left, 
-        #    but plotting origin='lower' expects (0,0) at bottom-left.
-        feature_values_flipped = np.flipud(feature_values)
-        mask_flipped = np.flipud(mask)
         
-        # 2. Create masked array so obstacles appear white/empty initially
-        masked_features = np.ma.array(feature_values_flipped, mask=mask_flipped)
+        for col_idx, (has_key, has_key2) in enumerate(key_combinations):
+            ax = axes[feature_idx, col_idx]
+            feature_grid = all_feature_grids[col_idx]
+            feature_values = feature_grid[:, :, feature_idx]
 
-        # 3. Use imshow with extent. This renders the whole grid instantly.
-        #    extent=[0, W, 0, H] aligns the image pixels exactly with the patch coordinates below.
-        im = ax.imshow(masked_features, cmap=cmap, vmin=feature_min, vmax=feature_max, 
-                       origin='lower', interpolation='nearest', extent=[0, W, 0, H])
+            # --- IMPORTANT TRANSFORMATION ---
+            # 1. Flip data Upside-Down (UD) because Gridworld (0,0) is top-left, 
+            #    but plotting origin='lower' expects (0,0) at bottom-left.
+            feature_values_flipped = np.flipud(feature_values)
+            mask_flipped = np.flipud(mask)
+            
+            # 2. Create masked array so obstacles appear white/empty initially
+            masked_features = np.ma.array(feature_values_flipped, mask=mask_flipped)
 
-        # --- DRAW OVERLAYS (Using pre-calculated lists for speed) ---
-        
-        # Obstacles
-        for r, c in obstacle_locs:
-            plot_row = H - 1 - r
-            rect = patches.Rectangle((c, plot_row), 1, 1, linewidth=edge_linewidth, 
-                                    edgecolor='black', facecolor='grey', zorder=5)
+            # 3. Use imshow with extent. This renders the whole grid instantly.
+            im = ax.imshow(masked_features, cmap=cmap, vmin=feature_min, vmax=feature_max, 
+                           origin='lower', interpolation='nearest', extent=[0, W, 0, H])
+
+            # --- DRAW OVERLAYS ---
+            
+            # Obstacles
+            for r, c in obstacle_locs:
+                plot_row = H - 1 - r
+                rect = patches.Rectangle((c, plot_row), 1, 1, linewidth=edge_linewidth, 
+                                        edgecolor='black', facecolor='grey', zorder=5)
+                ax.add_patch(rect)
+
+            # Goal
+            goal_row, goal_col = int(basic_env.goal_loc[0]), int(basic_env.goal_loc[1])
+            plot_goal_row = H - 1 - goal_row
+            rect = patches.Rectangle((goal_col, plot_goal_row), 1, 1, linewidth=edge_linewidth, 
+                                    edgecolor='black', facecolor='green', zorder=5)
             ax.add_patch(rect)
+            ax.text(goal_col + 0.5, plot_goal_row + 0.5, 'G', ha='center', va='center', 
+                   fontsize=value_fontsize, color='white', weight='bold', zorder=6)
 
-        # Goal
-        goal_row, goal_col = int(basic_env.goal_loc[0]), int(basic_env.goal_loc[1])
-        plot_goal_row = H - 1 - goal_row
-        rect = patches.Rectangle((goal_col, plot_goal_row), 1, 1, linewidth=edge_linewidth, 
-                                edgecolor='black', facecolor='green', zorder=5)
-        ax.add_patch(rect)
-        ax.text(goal_col + 0.5, plot_goal_row + 0.5, 'G', ha='center', va='center', 
-               fontsize=value_fontsize, color='white', weight='bold', zorder=6)
+            # Text Values (Only iterate valid locations)
+            for idx, (row, col) in enumerate(locations):
+                raw_value = feature_values[row, col]
+                if not np.isnan(raw_value):
+                    plot_row = H - 1 - row
+                    intensity = (raw_value - feature_min) / feature_range if feature_range > 0 else 0.5
+                    text_color = "white" if intensity > 0.6 else "black"
+                    ax.text(col + 0.5, plot_row + 0.5, f'{raw_value:.2f}', 
+                           ha='center', va='center', fontsize=value_fontsize, color=text_color, zorder=7)
 
-        # Text Values (Only iterate valid locations)
-        for idx, (row, col) in enumerate(locations):
-            raw_value = feature_values[row, col]
-            if not np.isnan(raw_value):
-                plot_row = H - 1 - row
-                intensity = (raw_value - feature_min) / feature_range if feature_range > 0 else 0.5
-                text_color = "white" if intensity > 0.6 else "black"
-                ax.text(col + 0.5, plot_row + 0.5, f'{raw_value:.2f}', 
-                       ha='center', va='center', fontsize=value_fontsize, color=text_color, zorder=7)
+            # Penalty Dots
+            for r, c in penalty_locs:
+                plot_row = H - 1 - r
+                dot_size = max(10, min(50, 200 / max(1, max_dim)))
+                ax.scatter(c + 0.85, plot_row + 0.85, s=dot_size, c='yellow', 
+                          edgecolors='black', linewidths=edge_linewidth * 0.5, zorder=10)
 
-        # Penalty Dots
-        for r, c in penalty_locs:
-            plot_row = H - 1 - r
-            dot_size = max(10, min(50, 200 / max(1, max_dim)))
-            ax.scatter(c + 0.85, plot_row + 0.85, s=dot_size, c='yellow', 
-                      edgecolors='black', linewidths=edge_linewidth * 0.5, zorder=10)
+            # Start Markers
+            for r, c in start_locs_list:
+                plot_row = H - 1 - r
+                ax.text(c + 0.85, plot_row + 0.85, 's', ha='center', va='center', 
+                       fontsize=value_fontsize * 0.6, color='green', weight='bold', zorder=11)
+            
+            # Key Markers
+            if has_key is not None and not has_key and key_loc is not None:
+                key_row, key_col = key_loc
+                plot_key_row = H - 1 - key_row
+                ax.text(key_col + 0.85, plot_key_row + 0.85, 'k1', ha='center', va='center', 
+                        fontsize=value_fontsize * 0.6, color='darkred', weight='bold', zorder=15)
+            
+            if has_key2 is not None and not has_key2 and key_loc2 is not None:
+                key2_row, key2_col = key_loc2
+                plot_key2_row = H - 1 - key2_row
+                ax.text(key2_col + 0.85, plot_key2_row + 0.85, 'k2', ha='center', va='center', 
+                        fontsize=value_fontsize * 0.6, color='darkblue', weight='bold', zorder=15)
 
-        # Start Markers
-        for r, c in start_locs_list:
-            plot_row = H - 1 - r
-            ax.text(c + 0.85, plot_row + 0.85, 's', ha='center', va='center', 
-                   fontsize=value_fontsize * 0.6, color='green', weight='bold', zorder=11)
-        
-        # Key Marker
-        if has_key is not None and not has_key and hasattr(basic_env, 'fixed_key_loc'):
-            key_row, key_col = basic_env.fixed_key_loc
-            plot_key_row = H - 1 - key_row
-            ax.text(key_col + 0.85, plot_key_row + 0.85, 'k', ha='center', va='center', 
-                    fontsize=value_fontsize * 0.6, color='gold', weight='bold', zorder=15)
-
-        ax.set_xlim(0, W)
-        ax.set_ylim(0, H)
-        ax.set_aspect('equal')
-        ax.set_xticks([])
-        ax.set_yticks([])
-        ax.set_title(f"Feature {feature_idx}", fontsize=value_fontsize + 2)
-
-    print("hiding unused subplots...")
-    # Hide unused subplots
-    for idx in range(feature_dim, len(axes_flat)):
-        axes_flat[idx].axis("off")
+            ax.set_xlim(0, W)
+            ax.set_ylim(0, H)
+            ax.set_aspect('equal')
+            ax.set_xticks([])
+            ax.set_yticks([])
+            
+            # Add title to top row only
+            if feature_idx == 0:
+                if two_keys:
+                    col_title = f"has_key1={has_key}, has_key2={has_key2}"
+                elif has_key is not None:
+                    col_title = f"has_key={has_key}"
+                else:
+                    col_title = "No Keys"
+                ax.set_title(col_title, fontsize=title_fontsize)
+            
+            # Add feature label to leftmost column only
+            if col_idx == 0:
+                ax.set_ylabel(f"Feature {feature_idx}", fontsize=title_fontsize, rotation=90, labelpad=10)
 
     print("adding tight layout...")
-    fig.suptitle(title, fontsize=value_fontsize + 6)
+    fig.suptitle(title, fontsize=title_fontsize + 6)
     plt.tight_layout(rect=(0, 0, 1, 0.96))
 
     print("saving figure...")

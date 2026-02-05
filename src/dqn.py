@@ -730,8 +730,12 @@ def make_train(config):
     return train
 
 
-def _get_all_observations_vectorized(basic_env, env_params, has_key=None):
+def _get_all_observations_vectorized(basic_env, env_params, has_key=None, has_key2=None):
     """Generate all valid observations in a vectorized manner.
+    
+    Args:
+        has_key: Boolean for first key state (None if no key mechanism)
+        has_key2: Boolean for second key state (None if no second key)
     
     Returns:
         obs_batch: Array of observations for all valid locations
@@ -762,8 +766,20 @@ def _get_all_observations_vectorized(basic_env, env_params, has_key=None):
     # Create all states
     agent_locs = jnp.array([[row, col] for row, col in locations])
     key_loc = basic_env.fixed_key_loc if (has_key is not None and hasattr(basic_env, 'fixed_key_loc')) else jnp.array([0, 0])
+    key_loc2 = basic_env.fixed_key_loc2 if (has_key2 is not None and hasattr(basic_env, 'fixed_key_loc2')) else jnp.array([0, 0])
     
-    if has_key is not None:
+    if has_key is not None and has_key2 is not None:
+        # Two-key environment
+        states = jax.vmap(lambda loc: GridworldEnvState(
+            time=0,
+            agent_loc=loc,
+            has_key=jnp.array(has_key),
+            key_loc=key_loc,
+            has_key2=jnp.array(has_key2),
+            key_loc2=key_loc2
+        ))(agent_locs)
+    elif has_key is not None:
+        # One-key environment
         states = jax.vmap(lambda loc: GridworldEnvState(
             time=0,
             agent_loc=loc,
@@ -771,6 +787,7 @@ def _get_all_observations_vectorized(basic_env, env_params, has_key=None):
             key_loc=key_loc
         ))(agent_locs)
     else:
+        # No-key environment
         states = jax.vmap(lambda loc: GridworldEnvState(
             time=0,
             agent_loc=loc
@@ -788,20 +805,29 @@ def plot_qvals(network_params, config, save_dir):
     basic_env, env_params = make(config["ENV_NAME"])
     network = make_network(config, action_dim=basic_env.action_space(env_params).n)
     
-    # Check if environment has a key
-    has_key_mechanism = hasattr(basic_env, 'fixed_key_loc') and hasattr(basic_env, 'use_fixed_key_loc')
+    # Check if environment has keys
+    has_one_key = hasattr(basic_env, 'fixed_key_loc') and hasattr(basic_env, 'use_fixed_key_loc')
+    has_two_keys = hasattr(basic_env, 'fixed_key_loc2') and hasattr(basic_env, 'use_fixed_key_loc')
     
-    if has_key_mechanism and basic_env.use_fixed_key_loc:
-        # Plot for both has_key=False and has_key=True
+    if has_two_keys and basic_env.use_fixed_key_loc:
+        # Two-key environment: plot for all four combinations
         for has_key in [False, True]:
-            _plot_qvals_single(network_params, config, save_dir, network, basic_env, env_params, has_key)
+            for has_key2 in [False, True]:
+                _plot_qvals_single(network_params, config, save_dir, network, basic_env, env_params, has_key, has_key2)
+    elif has_one_key and basic_env.use_fixed_key_loc:
+        # One-key environment: plot for both has_key=False and has_key=True
+        for has_key in [False, True]:
+            _plot_qvals_single(network_params, config, save_dir, network, basic_env, env_params, has_key, None)
     else:
         # Plot without key consideration
-        _plot_qvals_single(network_params, config, save_dir, network, basic_env, env_params, None)
+        _plot_qvals_single(network_params, config, save_dir, network, basic_env, env_params, None, None)
 
 
-def _plot_qvals_single(network_params, config, save_dir, network, basic_env, env_params, has_key):
-    print("Generating Q-value plot for has_key =", has_key)
+def _plot_qvals_single(network_params, config, save_dir, network, basic_env, env_params, has_key, has_key2=None):
+    if has_key2 is not None:
+        print(f"Generating Q-value plot for has_key={has_key}, has_key2={has_key2}")
+    else:
+        print("Generating Q-value plot for has_key =", has_key)
     """Helper function to plot Q-values for a single key state (or no key)."""
     # Get grid dimensions
     H = basic_env.H
@@ -811,7 +837,7 @@ def _plot_qvals_single(network_params, config, save_dir, network, basic_env, env
     q_values_grid = jnp.zeros((H, W, 4))  # 4 actions: up, right, down, left
     
     # Vectorized observation generation and forward pass
-    obs_batch, locations, valid_mask = _get_all_observations_vectorized(basic_env, env_params, has_key)
+    obs_batch, locations, valid_mask = _get_all_observations_vectorized(basic_env, env_params, has_key, has_key2)
     
     if len(locations) > 0:
         # Single jitted forward pass for all locations
@@ -936,7 +962,10 @@ def _plot_qvals_single(network_params, config, save_dir, network, basic_env, env
     title_fontsize = max(10, min(16, 100 / max_dim))
     
     # Add key state to title if applicable
-    if has_key is not None:
+    if has_key2 is not None:
+        key_state_str = f"key1={'Y' if has_key else 'N'}, key2={'Y' if has_key2 else 'N'}"
+        ax.set_title(f'Action Values for {config["ENV_NAME"]} ({key_state_str})', fontsize=title_fontsize)
+    elif has_key is not None:
         key_state_str = "with key" if has_key else "without key"
         ax.set_title(f'Action Values for {config["ENV_NAME"]} ({key_state_str})', fontsize=title_fontsize)
     else:
@@ -949,24 +978,44 @@ def _plot_qvals_single(network_params, config, save_dir, network, basic_env, env
         key_row, key_col = basic_env.fixed_key_loc
         plot_key_row = H - 1 - key_row
         # Draw a small gold 'k' in upper right corner
-        ax.text(key_col + 0.85, plot_key_row + 0.85, 'k', ha='center', va='center', 
-                fontsize=label_fontsize * 0.6, color='gold', weight='bold', zorder=15)
+        ax.text(key_col + 0.85, plot_key_row + 0.85, 'k1', ha='center', va='center', 
+                fontsize=label_fontsize * 0.6, color='darkred', weight='bold', zorder=15)
+    
+    # Add second key location marker if applicable
+    if has_key2 is not None and not has_key2 and hasattr(basic_env, 'fixed_key_loc2'):
+        key2_row, key2_col = basic_env.fixed_key_loc2
+        plot_key2_row = H - 1 - key2_row
+        # Draw a small blue 'k2' in upper right corner
+        ax.text(key2_col + 0.85, plot_key2_row + 0.85, 'k2', ha='center', va='center', 
+                fontsize=label_fontsize * 0.6, color='darkblue', weight='bold', zorder=15)
     
     plt.tight_layout()
     os.makedirs(save_dir, exist_ok=True)
     
     # Adjust filename based on key state
-    if has_key is not None:
+    if has_key is None and has_key2 is None:
+        save_path = os.path.join(save_dir, f'q_vals_{config["ENV_NAME"]}.png')
+    elif has_key2 is not None:
+        # Two-key environment
+        key1_suffix = "_key1" if has_key else "_nokey1"
+        key2_suffix = "_key2" if has_key2 else "_nokey2"
+        save_path = os.path.join(save_dir, f'q_vals_{config["ENV_NAME"]}{key1_suffix}{key2_suffix}.png')
+    else:
+        # One-key environment
         key_suffix = "_with_key" if has_key else "_without_key"
         save_path = os.path.join(save_dir, f'q_vals_{config["ENV_NAME"]}{key_suffix}.png')
-    else:
-        save_path = os.path.join(save_dir, f'q_vals_{config["ENV_NAME"]}.png')
     
     plt.savefig(save_path, dpi=300, bbox_inches='tight')
 
     # Log figure to wandb if enabled
     if wandb.run is not None:
-        log_key = f"q_values_{key_suffix[1:]}" if has_key is not None else "q_values"
+        if has_key2 is not None:
+            log_key = f"q_values_key1{'Y' if has_key else 'N'}_key2{'Y' if has_key2 else 'N'}"
+        elif has_key is not None:
+            key_suffix = "with_key" if has_key else "without_key"
+            log_key = f"q_values_{key_suffix}"
+        else:
+            log_key = "q_values"
         wandb.log({log_key: wandb.Image(fig)})
 
     plt.close(fig)
@@ -977,11 +1026,25 @@ def _plot_feature_heatmaps(network_params, config, save_dir, method_name, title,
     basic_env, env_params = make(config["ENV_NAME"])
     network = make_network(config, action_dim=basic_env.action_space(env_params).n)
     
-    # Check if environment has a key
-    has_key_mechanism = hasattr(basic_env, 'fixed_key_loc') and hasattr(basic_env, 'use_fixed_key_loc')
+    # Check if environment has keys
+    has_one_key = hasattr(basic_env, 'fixed_key_loc') and hasattr(basic_env, 'use_fixed_key_loc')
+    has_two_keys = hasattr(basic_env, 'fixed_key_loc2') and hasattr(basic_env, 'use_fixed_key_loc')
     
-    if has_key_mechanism and basic_env.use_fixed_key_loc:
-        # Plot for both has_key=False and has_key=True
+    if has_two_keys and basic_env.use_fixed_key_loc:
+        # Two-key environment: plot for all four combinations
+        for has_key in [False, True]:
+            for has_key2 in [False, True]:
+                key1_suffix = "_key1" if has_key else "_nokey1"
+                key2_suffix = "_key2" if has_key2 else "_nokey2"
+                modified_filename = filename.replace('.png', f'{key1_suffix}{key2_suffix}.png')
+                key_state_str = f"key1={'Y' if has_key else 'N'}, key2={'Y' if has_key2 else 'N'}"
+                modified_title = f"{title} ({key_state_str})"
+                _plot_feature_heatmaps_single(
+                    network_params, config, save_dir, method_name, 
+                    modified_title, modified_filename, network, basic_env, env_params, has_key, has_key2
+                )
+    elif has_one_key and basic_env.use_fixed_key_loc:
+        # One-key environment: plot for both has_key=False and has_key=True
         for has_key in [False, True]:
             key_suffix = "_with_key" if has_key else "_without_key"
             modified_filename = filename.replace('.png', f'{key_suffix}.png')
@@ -989,16 +1052,16 @@ def _plot_feature_heatmaps(network_params, config, save_dir, method_name, title,
             modified_title = f"{title} ({key_state_str})"
             _plot_feature_heatmaps_single(
                 network_params, config, save_dir, method_name, 
-                modified_title, modified_filename, network, basic_env, env_params, has_key
+                modified_title, modified_filename, network, basic_env, env_params, has_key, None
             )
     else:
         # Plot without key consideration
         _plot_feature_heatmaps_single(
             network_params, config, save_dir, method_name, 
-            title, filename, network, basic_env, env_params, None
+            title, filename, network, basic_env, env_params, None, None
         )
 
-def _plot_feature_heatmaps_single(network_params, config, save_dir, method_name, title, filename, network, basic_env, env_params, has_key):
+def _plot_feature_heatmaps_single(network_params, config, save_dir, method_name, title, filename, network, basic_env, env_params, has_key, has_key2=None):
     """
     Optimized heatmap plotter using vectorized inference and fast Matplotlib rendering.
     """
@@ -1011,10 +1074,13 @@ def _plot_feature_heatmaps_single(network_params, config, save_dir, method_name,
     penalty_locs = []
     start_locs_list = []
     
-    # Get key location if it exists
+    # Get key locations if they exist
     key_loc = None
+    key_loc2 = None
     if hasattr(basic_env, 'fixed_key_loc'):
         key_loc = (int(basic_env.fixed_key_loc[0]), int(basic_env.fixed_key_loc[1]))
+    if hasattr(basic_env, 'fixed_key_loc2'):
+        key_loc2 = (int(basic_env.fixed_key_loc2[0]), int(basic_env.fixed_key_loc2[1]))
     
     # We use basic numpy/python here as it's run only once per figure
     for r in range(H):
@@ -1024,16 +1090,17 @@ def _plot_feature_heatmaps_single(network_params, config, save_dir, method_name,
             elif basic_env._penalty_map[r, c] != 0.0 and not np.array_equal([r,c], basic_env.goal_loc):
                 penalty_locs.append((r, c))
             
-            # Check start locations (exclude key location)
+            # Check start locations (exclude key locations)
             agent_loc = jnp.array([r, c])
             is_start = any(jnp.array_equal(agent_loc, start_loc) for start_loc in basic_env._start_locs)
             if is_start and basic_env._obstacles_map[r, c] != 1.0:
-                if key_loc is None or (r, c) != key_loc:
+                if ((key_loc is None or (r, c) != key_loc) and 
+                    (key_loc2 is None or (r, c) != key_loc2)):
                     start_locs_list.append((r, c))
 
     # --- 2. VECTORIZED INFERENCE ---
     # Call your existing helper function
-    obs_batch, locations, valid_mask = _get_all_observations_vectorized(basic_env, env_params, has_key)
+    obs_batch, locations, valid_mask = _get_all_observations_vectorized(basic_env, env_params, has_key, has_key2)
     
     if len(locations) == 0:
         return

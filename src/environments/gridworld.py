@@ -15,6 +15,8 @@ class EnvState(environment.EnvState):
     agent_loc: jax.Array
     has_key: jax.Array = struct.field(default_factory=lambda: jnp.array(False))
     key_loc: jax.Array = struct.field(default_factory=lambda: jnp.array([0, 0]))
+    has_key2: jax.Array = struct.field(default_factory=lambda: jnp.array(False))
+    key_loc2: jax.Array = struct.field(default_factory=lambda: jnp.array([0, 0]))
 
 @struct.dataclass
 class EnvParams(environment.EnvParams):
@@ -776,6 +778,381 @@ class KeyCollectionMixinSparseReward:
 
         return obs
 
+class TwoKeyCollectionMixin:
+    """Mixin that requires collecting two keys before reaching the goal."""
+    H: int  # Type hint for mixin - provided by Gridworld base class
+    W: int  # Type hint for mixin - provided by Gridworld base class
+    _obstacles_map: jax.Array  # Type hint for mixin - provided by Gridworld base class
+    _rgb_template: jax.Array  # Type hint for mixin - provided by GridworldRGB base class
+    goal_loc: jax.Array  # Type hint for mixin - provided by Gridworld base class
+    _penalty_map: jax.Array  # Type hint for mixin - provided by Gridworld base class
+    goal_reward: float  # Type hint for mixin - provided by Gridworld base class
+    directions: jax.Array  # Type hint for mixin - provided by Gridworld base class
+    _start_locs: jax.Array  # Type hint for mixin - provided by Gridworld base class
+    fixed_key_loc: jax.Array  # Type hint for mixin - optional fixed key location
+    fixed_key_loc2: jax.Array  # Type hint for mixin - optional fixed second key location
+    use_fixed_key_loc: bool  # Type hint for mixin - whether to use fixed key locations
+    
+    def __init__(self, fixed_key_loc: jax.Array, fixed_key_loc2: jax.Array, use_fixed_key_loc: bool = False, **kwargs):
+        # 1. Initialize Superclass (Gridworld)
+        super().__init__(**kwargs) 
+        
+        # 2. Set Mixin variables
+        self.fixed_key_loc = fixed_key_loc
+        self.fixed_key_loc2 = fixed_key_loc2
+        self.use_fixed_key_loc = use_fixed_key_loc
+        
+        # 3. RE-CALCULATE start locations. 
+        self._start_locs = self._get_start_locs()
+
+    def _get_start_locs(self):
+        """
+        Get all valid starting locations.
+        Logic: Valid = (Not Obstacle) AND (Not Goal) AND (Not Fixed Key Locs).
+        """
+        # 1. Basic mask: Not a wall
+        valid_locs_mask = self._obstacles_map == 0.0
+        
+        # 2. Exclude Goal
+        valid_locs_mask = valid_locs_mask.at[self.goal_loc[0], self.goal_loc[1]].set(False)
+        
+        # 3. Exclude Fixed Key Locations (if using fixed keys)
+        if hasattr(self, 'use_fixed_key_loc') and self.use_fixed_key_loc:
+            valid_locs_mask = valid_locs_mask.at[self.fixed_key_loc[0], self.fixed_key_loc[1]].set(False)
+            valid_locs_mask = valid_locs_mask.at[self.fixed_key_loc2[0], self.fixed_key_loc2[1]].set(False)
+        valid_locs = jnp.argwhere(valid_locs_mask)
+        return valid_locs
+
+    def reset_env(
+        self, key: jax.Array, params: EnvParams
+        ) -> tuple[jax.Array, EnvState]:
+        """Reset environment state by sampling distinct start loc and two key locs."""
+        key, subkey = jax.random.split(key)
+        
+        num_start_locs = self._start_locs.shape[0]
+
+        # Branch A: Use Fixed Keys
+        # Agent spawns anywhere in _start_locs (which already excludes the key locs)
+        def reset_fixed_keys():
+            idx = jax.random.randint(subkey, (), 0, num_start_locs)
+            a_loc = self._start_locs[idx]
+            k_loc = self.fixed_key_loc
+            k_loc2 = self.fixed_key_loc2
+            return a_loc, k_loc, k_loc2
+
+        # Branch B: Use Random Keys
+        # We need 3 distinct locations from _start_locs.
+        def reset_random_keys():
+            # shape=(3,) ensures we get three indices. replace=False ensures they are unique.
+            indices = jax.random.choice(subkey, num_start_locs, shape=(3,), replace=False)
+            a_loc = self._start_locs[indices[0]]  # First index for Agent
+            k_loc = self._start_locs[indices[1]]  # Second index for Key 1
+            k_loc2 = self._start_locs[indices[2]] # Third index for Key 2
+            return a_loc, k_loc, k_loc2
+
+        # Execute logic
+        start_loc, key_loc, key_loc2 = jax.lax.cond(
+            self.use_fixed_key_loc,
+            reset_fixed_keys,
+            reset_random_keys
+        )
+
+        state = EnvState(
+            time=0,
+            agent_loc=start_loc,
+            has_key=jnp.array(False),
+            key_loc=key_loc,
+            has_key2=jnp.array(False),
+            key_loc2=key_loc2,
+        )
+
+        return self.get_obs(state, params), state
+    
+    def step_env(
+        self,
+        key: jax.Array,
+        state: EnvState,
+        action: int | float | jax.Array,
+        params: EnvParams,
+    ) -> tuple[jax.Array, EnvState, jax.Array, jax.Array, dict[Any, Any]]:
+        """Perform single timestep state transition with two key collection logic."""
+        # Get new agent location based on action
+        agent_loc_new = state.agent_loc + self.directions[action]
+        agent_loc_new = jnp.array([
+            jnp.clip(agent_loc_new[0], 0, self.H - 1),
+            jnp.clip(agent_loc_new[1], 0, self.W - 1)
+        ])
+        on_obstacle = self._obstacles_map[agent_loc_new[0], agent_loc_new[1]] == 1.0
+        agent_loc_new = jax.lax.select(
+            on_obstacle, state.agent_loc, agent_loc_new
+        )
+        
+        # Check if agent collected either key
+        collected_key = jnp.array_equal(agent_loc_new, state.key_loc)
+        has_key = jnp.logical_or(state.has_key, collected_key)
+        
+        collected_key2 = jnp.array_equal(agent_loc_new, state.key_loc2)
+        has_key2 = jnp.logical_or(state.has_key2, collected_key2)
+
+        state = EnvState(
+            time=state.time + 1,
+            agent_loc=agent_loc_new,
+            has_key=has_key,
+            key_loc=state.key_loc,
+            has_key2=has_key2,
+            key_loc2=state.key_loc2,
+        )
+
+        reward = jnp.array(-1.0)  # Constant step cost
+
+        done = self.is_terminal(state, params)  # type: ignore
+        truncated = self.is_truncated(state, params)  # type: ignore
+
+        return (
+            jax.lax.stop_gradient(self.get_obs(state, params=params)),  # type: ignore
+            jax.lax.stop_gradient(state),
+            reward,
+            done,
+            {"truncated": truncated}
+        )
+    
+    def is_terminal(self, state: EnvState, params: EnvParams) -> jax.Array:
+        """Check whether goal state (with both keys) or episode timeout is reached."""
+        # Check number of steps in episode termination condition
+        done_steps = self.is_truncated(state, params)  # type: ignore
+        # Check if agent has found the goal AND has both keys
+        at_goal = jnp.array_equal(state.agent_loc, self.goal_loc)
+        has_both_keys = jnp.logical_and(state.has_key, state.has_key2)
+        done_goal = jnp.logical_and(at_goal, has_both_keys)
+        
+        done = jnp.logical_or(done_goal, done_steps)
+        return done
+    
+    def get_obs(
+        self,
+        state: EnvState,
+        params: EnvParams,
+        key = None,
+    ) -> jax.Array:
+        """Return observation with two key locations and agent always bright blue."""
+        # N x N image with 3 Channels: [Wall/Key1, Empty, Agent/Key2]
+        obs = self._rgb_template.copy()
+        
+        # Set first key location (dark red if not collected, green if collected)
+        key1_visible = jnp.logical_not(state.has_key)
+        key1_color = jnp.where(
+            key1_visible,
+            jnp.array([0.5, 0.0, 0.0]),  # Dark red (0.5) if key not collected
+            jnp.array([0.0, 1.0, 0.0])   # Green if key collected (like empty space)
+        )
+        obs = obs.at[state.key_loc[0], state.key_loc[1]].set(key1_color)
+        
+        # Set second key location (dark blue if not collected, green if collected)
+        key2_visible = jnp.logical_not(state.has_key2)
+        key2_color = jnp.where(
+            key2_visible,
+            jnp.array([0.0, 0.0, 0.5]),  # Dark blue if key not collected
+            jnp.array([0.0, 1.0, 0.0])   # Green if key collected (like empty space)
+        )
+        obs = obs.at[state.key_loc2[0], state.key_loc2[1]].set(key2_color)
+        
+        # Set agent location - always bright blue
+        agent_color = jnp.array([0.0, 0.0, 1.0])  # Bright blue always
+        obs = obs.at[state.agent_loc[0], state.agent_loc[1]].set(agent_color)
+
+        return obs
+
+class TwoKeyCollectionMixinSparseReward:
+    """Mixin that requires collecting two keys before reaching the goal with sparse rewards (1 at goal, 0 otherwise)."""
+    H: int  # Type hint for mixin - provided by Gridworld base class
+    W: int  # Type hint for mixin - provided by Gridworld base class
+    _obstacles_map: jax.Array  # Type hint for mixin - provided by Gridworld base class
+    _rgb_template: jax.Array  # Type hint for mixin - provided by GridworldRGB base class
+    goal_loc: jax.Array  # Type hint for mixin - provided by Gridworld base class
+    _penalty_map: jax.Array  # Type hint for mixin - provided by Gridworld base class
+    goal_reward: float  # Type hint for mixin - provided by Gridworld base class
+    directions: jax.Array  # Type hint for mixin - provided by Gridworld base class
+    _start_locs: jax.Array  # Type hint for mixin - provided by Gridworld base class
+    fixed_key_loc: jax.Array  # Type hint for mixin - optional fixed key location
+    fixed_key_loc2: jax.Array  # Type hint for mixin - optional fixed second key location
+    use_fixed_key_loc: bool  # Type hint for mixin - whether to use fixed key locations
+    
+    def __init__(self, fixed_key_loc: jax.Array, fixed_key_loc2: jax.Array, use_fixed_key_loc: bool = False, **kwargs):
+        # 1. Initialize Superclass (Gridworld)
+        super().__init__(**kwargs) 
+        
+        # 2. Set Mixin variables
+        self.fixed_key_loc = fixed_key_loc
+        self.fixed_key_loc2 = fixed_key_loc2
+        self.use_fixed_key_loc = use_fixed_key_loc
+        
+        # 3. RE-CALCULATE start locations. 
+        self._start_locs = self._get_start_locs()
+
+    def _get_start_locs(self):
+        """
+        Get all valid starting locations.
+        Logic: Valid = (Not Obstacle) AND (Not Goal) AND (Not Fixed Key Locs).
+        """
+        # 1. Basic mask: Not a wall
+        valid_locs_mask = self._obstacles_map == 0.0
+        
+        # 2. Exclude Goal
+        valid_locs_mask = valid_locs_mask.at[self.goal_loc[0], self.goal_loc[1]].set(False)
+        
+        # 3. Exclude Fixed Key Locations (if using fixed keys)
+        if hasattr(self, 'use_fixed_key_loc') and self.use_fixed_key_loc:
+            valid_locs_mask = valid_locs_mask.at[self.fixed_key_loc[0], self.fixed_key_loc[1]].set(False)
+            valid_locs_mask = valid_locs_mask.at[self.fixed_key_loc2[0], self.fixed_key_loc2[1]].set(False)
+        valid_locs = jnp.argwhere(valid_locs_mask)
+        return valid_locs
+
+    def reset_env(
+        self, key: jax.Array, params: EnvParams
+        ) -> tuple[jax.Array, EnvState]:
+        """Reset environment state by sampling distinct start loc and two key locs."""
+        key, subkey = jax.random.split(key)
+        
+        num_start_locs = self._start_locs.shape[0]
+
+        # Branch A: Use Fixed Keys
+        # Agent spawns anywhere in _start_locs (which already excludes the key locs)
+        def reset_fixed_keys():
+            idx = jax.random.randint(subkey, (), 0, num_start_locs)
+            a_loc = self._start_locs[idx]
+            k_loc = self.fixed_key_loc
+            k_loc2 = self.fixed_key_loc2
+            return a_loc, k_loc, k_loc2
+
+        # Branch B: Use Random Keys
+        # We need 3 distinct locations from _start_locs.
+        def reset_random_keys():
+            # shape=(3,) ensures we get three indices. replace=False ensures they are unique.
+            indices = jax.random.choice(subkey, num_start_locs, shape=(3,), replace=False)
+            a_loc = self._start_locs[indices[0]]  # First index for Agent
+            k_loc = self._start_locs[indices[1]]  # Second index for Key 1
+            k_loc2 = self._start_locs[indices[2]] # Third index for Key 2
+            return a_loc, k_loc, k_loc2
+
+        # Execute logic
+        start_loc, key_loc, key_loc2 = jax.lax.cond(
+            self.use_fixed_key_loc,
+            reset_fixed_keys,
+            reset_random_keys
+        )
+
+        state = EnvState(
+            time=0,
+            agent_loc=start_loc,
+            has_key=jnp.array(False),
+            key_loc=key_loc,
+            has_key2=jnp.array(False),
+            key_loc2=key_loc2,
+        )
+
+        return self.get_obs(state, params), state
+    
+    def step_env(
+        self,
+        key: jax.Array,
+        state: EnvState,
+        action: int | float | jax.Array,
+        params: EnvParams,
+    ) -> tuple[jax.Array, EnvState, jax.Array, jax.Array, dict[Any, Any]]:
+        """Perform single timestep state transition with two key collection logic and sparse rewards."""
+        # Get new agent location based on action
+        agent_loc_new = state.agent_loc + self.directions[action]
+        agent_loc_new = jnp.array([
+            jnp.clip(agent_loc_new[0], 0, self.H - 1),
+            jnp.clip(agent_loc_new[1], 0, self.W - 1)
+        ])
+        on_obstacle = self._obstacles_map[agent_loc_new[0], agent_loc_new[1]] == 1.0
+        agent_loc_new = jax.lax.select(
+            on_obstacle, state.agent_loc, agent_loc_new
+        )
+        
+        # Check if agent collected either key
+        collected_key = jnp.array_equal(agent_loc_new, state.key_loc)
+        has_key = jnp.logical_or(state.has_key, collected_key)
+        
+        collected_key2 = jnp.array_equal(agent_loc_new, state.key_loc2)
+        has_key2 = jnp.logical_or(state.has_key2, collected_key2)
+
+        state = EnvState(
+            time=state.time + 1,
+            agent_loc=agent_loc_new,
+            has_key=has_key,
+            key_loc=state.key_loc,
+            has_key2=has_key2,
+            key_loc2=state.key_loc2,
+        )
+
+        # Calculate reward - only give reward of 1 when reaching goal with both keys, 0 otherwise
+        at_goal = jnp.array_equal(state.agent_loc, self.goal_loc)
+        has_both_keys = jnp.logical_and(state.has_key, state.has_key2)
+        goal_reward = jnp.asarray(
+            jnp.logical_and(at_goal, has_both_keys),
+            dtype=jnp.float32,
+        )
+        reward = goal_reward
+
+        done = self.is_terminal(state, params)  # type: ignore
+        truncated = self.is_truncated(state, params)  # type: ignore
+
+        return (
+            jax.lax.stop_gradient(self.get_obs(state, params=params)),  # type: ignore
+            jax.lax.stop_gradient(state),
+            reward,
+            done,
+            {"truncated": truncated}
+        )
+    
+    def is_terminal(self, state: EnvState, params: EnvParams) -> jax.Array:
+        """Check whether goal state (with both keys) or episode timeout is reached."""
+        # Check number of steps in episode termination condition
+        done_steps = self.is_truncated(state, params)  # type: ignore
+        # Check if agent has found the goal AND has both keys
+        at_goal = jnp.array_equal(state.agent_loc, self.goal_loc)
+        has_both_keys = jnp.logical_and(state.has_key, state.has_key2)
+        done_goal = jnp.logical_and(at_goal, has_both_keys)
+        
+        done = jnp.logical_or(done_goal, done_steps)
+        return done
+    
+    def get_obs(
+        self,
+        state: EnvState,
+        params: EnvParams,
+        key = None,
+    ) -> jax.Array:
+        """Return observation with two key locations and agent always bright blue."""
+        # N x N image with 3 Channels: [Wall/Key1, Empty, Agent/Key2]
+        obs = self._rgb_template.copy()
+        
+        # Set first key location (dark red if not collected, green if collected)
+        key1_visible = jnp.logical_not(state.has_key)
+        key1_color = jnp.where(
+            key1_visible,
+            jnp.array([0.5, 0.0, 0.0]),  # Dark red (0.5) if key not collected
+            jnp.array([0.0, 1.0, 0.0])   # Green if key collected (like empty space)
+        )
+        obs = obs.at[state.key_loc[0], state.key_loc[1]].set(key1_color)
+        
+        # Set second key location (dark blue if not collected, green if collected)
+        key2_visible = jnp.logical_not(state.has_key2)
+        key2_color = jnp.where(
+            key2_visible,
+            jnp.array([0.0, 0.0, 0.5]),  # Dark blue if key not collected
+            jnp.array([0.0, 1.0, 0.0])   # Green if key collected (like empty space)
+        )
+        obs = obs.at[state.key_loc2[0], state.key_loc2[1]].set(key2_color)
+        
+        # Set agent location - always bright blue
+        agent_color = jnp.array([0.0, 0.0, 1.0])  # Bright blue always
+        obs = obs.at[state.agent_loc[0], state.agent_loc[1]].set(agent_color)
+
+        return obs
+
 class MazeRGB(MazeMixin, GridworldRGB):
     def __init__(self):
         super().__init__(H=15, W=15, goal_loc=jnp.array([9, 9]))
@@ -864,3 +1241,35 @@ class EmptyRoom7x7RGBWithKeySparseReward(KeyCollectionMixinSparseReward, EmptyRo
     @property
     def name(self) -> str:
         return "EmptyRoom7x7RGBWithKeySparseReward"
+
+class EmptyRoom7x7RGBWithTwoKeys(TwoKeyCollectionMixin, EmptyRoomMixin, GridworldRGB):
+    def __init__(self, fixed_key_loc=jnp.array([6, 0]), fixed_key_loc2=jnp.array([0, 6])):
+        super().__init__(H=7, W=7, goal_loc=jnp.array([6, 6]), fixed_key_loc=fixed_key_loc, fixed_key_loc2=fixed_key_loc2, use_fixed_key_loc=True, goal_reward=0.0)
+
+    @property
+    def name(self) -> str:
+        return "EmptyRoom7x7RGBWithTwoKeys"
+
+class EmptyRoom7x7RGBWithTwoKeysSparseReward(TwoKeyCollectionMixinSparseReward, EmptyRoomMixin, GridworldRGB):
+    def __init__(self, fixed_key_loc=jnp.array([6, 0]), fixed_key_loc2=jnp.array([0, 6])):
+        super().__init__(H=7, W=7, goal_loc=jnp.array([6, 6]), fixed_key_loc=fixed_key_loc, fixed_key_loc2=fixed_key_loc2, use_fixed_key_loc=True)
+
+    @property
+    def name(self) -> str:
+        return "EmptyRoom7x7RGBWithTwoKeysSparseReward"
+
+class EmptyRoom7x7RGBWithTwoKeysRandomLoc(TwoKeyCollectionMixin, EmptyRoomMixin, GridworldRGB):
+    def __init__(self, fixed_key_loc=jnp.array([6, 0]), fixed_key_loc2=jnp.array([0, 6])):
+        super().__init__(H=7, W=7, goal_loc=jnp.array([6, 6]), fixed_key_loc=fixed_key_loc, fixed_key_loc2=fixed_key_loc2, use_fixed_key_loc=False, goal_reward=0.0)
+
+    @property
+    def name(self) -> str:
+        return "EmptyRoom7x7RGBWithTwoKeysRandomLoc"
+
+class EmptyRoom7x7RGBWithTwoKeysSparseRewardRandomLoc(TwoKeyCollectionMixinSparseReward, EmptyRoomMixin, GridworldRGB):
+    def __init__(self, fixed_key_loc=jnp.array([6, 0]), fixed_key_loc2=jnp.array([0, 6])):
+        super().__init__(H=7, W=7, goal_loc=jnp.array([6, 6]), fixed_key_loc=fixed_key_loc, fixed_key_loc2=fixed_key_loc2, use_fixed_key_loc=False)
+
+    @property
+    def name(self) -> str:
+        return "EmptyRoom7x7RGBWithTwoKeysSparseRewardRandomLoc"

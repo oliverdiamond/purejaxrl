@@ -609,10 +609,10 @@ def make_train(config):
                     
                     return loss_q + loss_sparsity, features
                 (loss, features), grads = jax.value_and_grad(_loss_fn, has_aux=True)(train_state.params)
-                alive_percent = jnp.mean(features)
+                percent_active = jnp.mean(features)
                 train_state = train_state.apply_gradients(grads=grads)
                 train_state = train_state.replace(n_updates=train_state.n_updates + 1)
-                return train_state, loss, alive_percent
+                return train_state, loss, percent_active
 
             rng, _rng = jax.random.split(rng)
             is_learn_time = (
@@ -624,7 +624,7 @@ def make_train(config):
                     train_state.timesteps % config["TRAINING_INTERVAL"] == 0
                 )  # training interval
             )
-            train_state, loss, alive_percent = jax.lax.cond(
+            train_state, loss, percent_active = jax.lax.cond(
                 is_learn_time,
                 lambda train_state, rng: _learn_phase(train_state, rng),
                 lambda train_state, rng: (train_state, jnp.array(0.0), jnp.array(0.0)),  # do nothing
@@ -653,7 +653,7 @@ def make_train(config):
                 "episode_step": info["episode_step"],
                 "done": info["done"],
                 "loss": loss,
-                "alive_percent": alive_percent,
+                "percent_active": percent_active,
             }
 
             # report on wandb if required
@@ -667,6 +667,7 @@ def make_train(config):
                         "episode_step": metric["episode_step"][0],
                         "loss": metric["loss"][0],
                         "done": metric["done"][0],
+                        "percent_active": metric["percent_active"][0]
                         }
                     )
                 jax.lax.cond(
@@ -686,7 +687,7 @@ def make_train(config):
                     ]
                     timesteps = info["timestep"][info["done"]]
                     loss = info["loss"]
-                    alive_pct = float(info['alive_percent'])
+                    percent_active = float(info['percent_active'])
 
                     for t in range(len(timesteps)):
                         print(
@@ -696,20 +697,10 @@ def make_train(config):
                                     f"return={returns[t]}",
                                     f"episode_step={steps[t]}",
                                     f"loss={loss:.4f}",
-                                    f"alive_percent={alive_pct:.4f}"
+                                    f"percent_active={percent_active:.4f}"
                                 ]
                             )
                         )
-                # def callback(info):
-                #     if info["timestep"][0] % 1000 == 0:
-                #         print(
-                #             " ".join(
-                #                 [
-                #                     f"timestep={info['timestep'][0]},",
-                #                     f"alive_percent={info['alive_percent']:.4f}"
-                #                 ]
-                #             )
-                #         )
 
                 jax.debug.callback(callback, metric)
 

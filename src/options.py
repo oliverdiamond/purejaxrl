@@ -1203,6 +1203,23 @@ if __name__ == "__main__":
 
         hypers = params["metaParameters"]
 
+        # file_context = exp.buildSaveContext(idx)
+        # file_context.ensureExists()
+        # base_dir = file_context.resolve()
+        # save_dir = os.path.join(base_dir, f"{idx}")
+        # os.makedirs(save_dir, exist_ok=True)
+
+        # feature_dir = save_dir
+        # main_dir = save_dir
+        # dataset_dir = save_dir
+
+        # with open(os.path.join(feature_dir, "params.json"), "r") as f:
+        #     feature_params = json.load(f)
+        #     main_params = feature_params
+
+        # with open(os.path.join(dataset_dir, "params.json"), "r") as f:
+        #     dataset_params = json.load(f)
+
         feature_dir = load_env_dir(hypers['feature_dir'], hypers["env_name"])
         with open(os.path.join(feature_dir, "params.json"), "r") as f:
             feature_params = json.load(f)
@@ -1221,6 +1238,7 @@ if __name__ == "__main__":
 
         print(f"Specified hypers for idx {idx}:")
         print(json.dumps(hypers, indent=2))
+
         config = {
             "SEED": hypers["seed"],
             "N_SEEDS": hypers["n_seeds"],
@@ -1265,6 +1283,12 @@ if __name__ == "__main__":
         config["ACTION_DIM"] = dummy_env.action_space(env_params).n
         config["OBS_SHAPE"] = dummy_env.observation_space(env_params).shape
 
+        file_context = exp.buildSaveContext(idx)
+        file_context.ensureExists()
+        base_dir = file_context.resolve()
+        save_dir = os.path.join(base_dir, f"{idx}")
+        os.makedirs(save_dir, exist_ok=True)
+
         # run = wandb.init(
         #     entity=WANDB_ENTITY,
         #     project=WANDB_PROJECT,
@@ -1302,12 +1326,6 @@ if __name__ == "__main__":
         config["DATASET_SIZE"] = dataset["obs"].shape[0]
         print(f"Loaded dataset from {dataset_path}")
         print(f"Dataset shapes - obs: {dataset['obs'].shape}, action: {dataset['action'].shape}, next_obs: {dataset['next_obs'].shape}, reward: {dataset['reward'].shape}, done: {dataset['done'].shape}")
-
-        file_context = exp.buildSaveContext(idx)
-        file_context.ensureExists()
-        base_dir = file_context.resolve()
-        save_dir = os.path.join(base_dir, f"{idx}")
-        os.makedirs(save_dir, exist_ok=True)
 
         log_file_path = os.path.join(save_dir, "run_log.txt")
         with open(log_file_path, "w") as f:

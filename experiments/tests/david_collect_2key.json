@@ -1,0 +1,11 @@
+{
+    "agent": "random",
+    "wandb_mode": "disabled",
+    "metaParameters": {
+        "total_timesteps": 300000,
+        "seed": 0,
+        "num_envs": 1,
+        "env_name": "EmptyRoom7x7RGBWithTwoKeysSparseReward"
+    }
+}
+

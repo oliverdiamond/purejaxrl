@@ -14,5 +14,8 @@ results/
 plots/
 analysis/plots/
 
+# Local settings
+local_settings.json
+
 # venv
 venv.tar.xz

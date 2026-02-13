@@ -657,7 +657,8 @@ def make_train(config):
             }
 
             # report on wandb if required
-            if params.get("wandb_mode", False) == "online" and config["N_SEEDS"] == 1:
+            if ((params.get("wandb_mode", False) == "online"
+                or params.get("wandb_mode", False) == "offline" ) and config["N_SEEDS"] == 1):
                 def wandb_callback(metric):
                     wandb.log(
                         {
@@ -665,9 +666,9 @@ def make_train(config):
                         "discounted_reward_sum": metric["discounted_reward_sum"][0],
                         "timestep": metric["timestep"][0],
                         "episode_step": metric["episode_step"][0],
-                        "loss": metric["loss"][0],
+                        "loss": metric["loss"],
                         "done": metric["done"][0],
-                        "percent_active": metric["percent_active"][0]
+                        "percent_active": metric["percent_active"]
                         }
                     )
                 jax.lax.cond(
@@ -1360,6 +1361,7 @@ if __name__ == "__main__":
 
         assert config['NUM_ENVS'] == 1, "Parallel envs is broken with our current truncation handling"
 
+        print("Wandb entity:", WANDB_ENTITY)
         run = wandb.init(
             entity=WANDB_ENTITY,
             project=WANDB_PROJECT,
@@ -1469,9 +1471,12 @@ if __name__ == "__main__":
                 out_pickle = (finished_idxs, params_dict)
                 pickle.dump(out_pickle, finished_jobs)
 
-        print(f"Finished saving results for idx {idx}")
+        print(f"Finished saving results for idx {idx} into '{base_dir}'.")
 
         del results
         del metrics
 
         run.finish()
+
+    total_time_str = get_time_str(time.time() - start_time_all)
+    print(f"All done! Total time for all {config['N_SEEDS']} idxs: {total_time_str}.")

@@ -1363,10 +1363,10 @@ def _plot_feature_heatmaps_grid(network_params, config, save_dir, method_name, t
                 ax.add_patch(rect)
             
             # --- Key 3 Square (Purple) - Distractor Key ---
-            if key_locs_set and combo_key_loc3 is not None:
+            if key_locs_set and has_key3 is not None and not has_key3 and combo_key_loc3 is not None:
                 key3_row, key3_col = combo_key_loc3
                 plot_key3_row = H - 1 - key3_row
-                # Solid purple square for distractor key
+                # Solid purple square for distractor key (only show if not collected)
                 rect = patches.Rectangle((key3_col, plot_key3_row), 1, 1, linewidth=edge_linewidth,
                                          edgecolor='black', facecolor='purple', zorder=5)
                 ax.add_patch(rect)

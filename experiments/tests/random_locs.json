@@ -1,7 +1,7 @@
 {
     "agent": "dqn",
     "save_weights": true,
-    "wandb_mode": "offline",
+    "wandb_mode": "disabled",
     "metaParameters": {
         "total_timesteps": 300000,
         "seed": 0,

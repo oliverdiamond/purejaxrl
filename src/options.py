@@ -35,7 +35,7 @@ from environments.gridworld import EnvState as GridworldEnvState, Gridworld
 from util import get_time_str, WANDB_ENTITY, WANDB_PROJECT
 from util.fta import fta
 from experiment import experiment_model
-from dqn import QNet, QNet2, QNetFTA, QNetLinear
+from dqn import QNet, QNet2, QNetFTA, QNetLinear, QNet2Bernoulli
 
 def make_stopping_condition(
     config, 
@@ -247,10 +247,7 @@ def make_options_network(config, action_dim, n_options):
                 out_axes=0,
                 axis_size=n_options,
                 methods=['__call__']
-            )(action_dim=action_dim, 
-            conv1_dim=config["CONV1_DIM"], 
-            conv2_dim=config["CONV2_DIM"], 
-            rep_dim=config["REP_DIM"])
+            )(action_dim=action_dim)
     elif config["NETWORK_NAME"] == "QNetLinear":
         return nn.vmap(
             QNetLinear,
@@ -262,15 +259,26 @@ def make_options_network(config, action_dim, n_options):
             methods=['__call__']
         )(action_dim=action_dim)
     elif config["NETWORK_NAME"] == "QNet2":
-        return nn.vmap(
-            QNet2,
-            variable_axes={'params': 0},
-            split_rngs={'params': True},
-            in_axes=(None,),
-            out_axes=0,
-            axis_size=n_options,
-            methods=['__call__']
-        )(action_dim=action_dim)
+        if config["ACTIVATION"] == "relu":
+            return nn.vmap(
+                QNet2,
+                variable_axes={'params': 0},
+                split_rngs={'params': True},
+                in_axes=(None,),
+                out_axes=0,
+                axis_size=n_options,
+                methods=['__call__']
+            )(action_dim=action_dim)
+        elif config["ACTIVATION"] == "bernoulli":
+            return nn.vmap(
+                QNet2Bernoulli,
+                variable_axes={'params': 0},
+                split_rngs={'params': True},
+                in_axes=(None,),
+                out_axes=0,
+                axis_size=n_options,
+                methods=['__call__']
+            )(action_dim=action_dim)
     else:
         raise ValueError("Option learning currently only supports ReLU activations")
     
@@ -305,9 +313,14 @@ def make_feature_network(config, action_dim):
                 action_dim=action_dim
             )
         elif feature_net_hypers["network_name"] == "QNet2":
-            return QNet2(
-            action_dim=action_dim
-        )
+            if feature_net_hypers.get("activation") == "bernoulli":
+                return QNet2Bernoulli(
+                    action_dim=action_dim
+                )
+            else:
+                return QNet2(
+                    action_dim=action_dim
+                )
     else:
         raise ValueError(f"Unknown feature network: {feature_net_type}")
 
@@ -342,9 +355,14 @@ def make_main_network(config, action_dim):
                 action_dim=action_dim
             )
         elif main_net_hypers["network_name"] == "QNet2":
-            return QNet2(
-            action_dim=action_dim
-        )
+            if main_net_hypers.get("activation") == "bernoulli":
+                return QNet2Bernoulli(
+                    action_dim=action_dim
+                )
+            else:
+                return QNet2(
+                    action_dim=action_dim
+                )
     else:
         raise ValueError(f"Unknown feature network: {main_net_type}")
 
@@ -527,8 +545,12 @@ def make_train(config):
 
     return train
 
-def _get_all_observations_vectorized(basic_env, env_params, has_key=None):
+def _get_all_observations_vectorized(basic_env, env_params, has_key=None, has_key2=None):
     """Generate all valid observations in a vectorized manner.
+    
+    Args:
+        has_key: Boolean for first key state (None if no key mechanism)
+        has_key2: Boolean for second key state (None if no second key)
     
     Returns:
         obs_batch: Array of observations for all valid locations
@@ -559,8 +581,20 @@ def _get_all_observations_vectorized(basic_env, env_params, has_key=None):
     # Create all states
     agent_locs = jnp.array([[row, col] for row, col in locations])
     key_loc = basic_env.fixed_key_loc if (has_key is not None and hasattr(basic_env, 'fixed_key_loc')) else jnp.array([0, 0])
+    key_loc2 = basic_env.fixed_key_loc2 if (has_key2 is not None and hasattr(basic_env, 'fixed_key_loc2')) else jnp.array([0, 0])
     
-    if has_key is not None:
+    if has_key is not None and has_key2 is not None:
+        # Two-key environment
+        states = jax.vmap(lambda loc: GridworldEnvState(
+            time=0,
+            agent_loc=loc,
+            has_key=jnp.array(has_key),
+            key_loc=key_loc,
+            has_key2=jnp.array(has_key2),
+            key_loc2=key_loc2
+        ))(agent_locs)
+    elif has_key is not None:
+        # One-key environment
         states = jax.vmap(lambda loc: GridworldEnvState(
             time=0,
             agent_loc=loc,
@@ -568,6 +602,7 @@ def _get_all_observations_vectorized(basic_env, env_params, has_key=None):
             key_loc=key_loc
         ))(agent_locs)
     else:
+        # No-key environment
         states = jax.vmap(lambda loc: GridworldEnvState(
             time=0,
             agent_loc=loc
@@ -585,10 +620,13 @@ def _get_static_locs(basic_env):
     penalty_locs = []
     start_locs = []
     
-    # Get key location if it exists
+    # Get key locations if they exist
     key_loc = None
+    key_loc2 = None
     if hasattr(basic_env, 'fixed_key_loc'):
         key_loc = (int(basic_env.fixed_key_loc[0]), int(basic_env.fixed_key_loc[1]))
+    if hasattr(basic_env, 'fixed_key_loc2'):
+        key_loc2 = (int(basic_env.fixed_key_loc2[0]), int(basic_env.fixed_key_loc2[1]))
     
     # Identify key locations once
     for r in range(H):
@@ -605,27 +643,40 @@ def _get_static_locs(basic_env):
                 if key_loc is None or (r, c) != key_loc:
                     start_locs.append((r, c))
                 
-    return obstacle_locs, penalty_locs, start_locs, key_loc
+    return obstacle_locs, penalty_locs, start_locs, key_loc, key_loc2
 
 def plot_stopping_values(network_params, config, save_dir):
     """Visualizes stopping values for all locations in the maze for each option."""
     # Create environment
     basic_env, env_params = make(config["ENV_NAME"])
-    # Check if environment has a key
-    has_key_mechanism = hasattr(basic_env, 'fixed_key_loc') and hasattr(basic_env, 'use_fixed_key_loc')
-    if has_key_mechanism and basic_env.use_fixed_key_loc:
+    # Check if environment has keys
+    has_one_key = hasattr(basic_env, 'fixed_key_loc') and hasattr(basic_env, 'use_fixed_key_loc')
+    has_two_keys = hasattr(basic_env, 'fixed_key_loc2') and hasattr(basic_env, 'use_fixed_key_loc')
+    
+    if has_two_keys and basic_env.use_fixed_key_loc:
+        # Two-key environment: plot for all four combinations
         for has_key in [False, True]:
-            _plot_stopping_values_single(network_params, config, save_dir, basic_env, env_params, has_key)
+            for has_key2 in [False, True]:
+                _plot_stopping_values_single(network_params, config, save_dir, basic_env, env_params, has_key, has_key2)
+    elif has_one_key and basic_env.use_fixed_key_loc:
+        # One-key environment: plot for both has_key=False and has_key=True
+        for has_key in [False, True]:
+            _plot_stopping_values_single(network_params, config, save_dir, basic_env, env_params, has_key, None)
     else:
-        _plot_stopping_values_single(network_params, config, save_dir, basic_env, env_params, None)
+        # Plot without key consideration
+        _plot_stopping_values_single(network_params, config, save_dir, basic_env, env_params, None, None)
 
-def _plot_stopping_values_single(network_params, config, save_dir, basic_env, env_params, has_key):
+def _plot_stopping_values_single(network_params, config, save_dir, basic_env, env_params, has_key, has_key2=None):
     """Optimized plotter using imshow and vectorized inference."""
+    if has_key2 is not None:
+        print(f"Generating stopping values plot for has_key={has_key}, has_key2={has_key2}")
+    else:
+        print("Generating stopping values plot for has_key =", has_key)
     H = basic_env.H
     W = basic_env.W
     
     # 1. Pre-calculate static lists
-    obstacle_locs, penalty_locs, start_locs_list, key_loc = _get_static_locs(basic_env)
+    obstacle_locs, penalty_locs, start_locs_list, key_loc, key_loc2 = _get_static_locs(basic_env)
 
     # Determine n_options from network_params
     n_options = jax.tree_util.tree_leaves(network_params)[0].shape[0]
@@ -708,8 +759,8 @@ def _plot_stopping_values_single(network_params, config, save_dir, basic_env, en
     )
     stop_cond = jax.jit(stop_cond)
     
-    # --- 2. VECTORIZED INFERENCE (Same as before) ---
-    obs_batch, locations, valid_mask = _get_all_observations_vectorized(basic_env, env_params, has_key)
+    # --- 2. VECTORIZED INFERENCE ---
+    obs_batch, locations, valid_mask = _get_all_observations_vectorized(basic_env, env_params, has_key, has_key2)
     
     # Initialize grids
     stop_val_grid = np.zeros((n_options, H, W))
@@ -824,12 +875,19 @@ def _plot_stopping_values_single(network_params, config, save_dir, basic_env, en
             ax.text(c + 0.85, plot_row + 0.85, 's', ha='center', va='center', 
                    fontsize=label_fontsize * 0.6, color='green', weight='bold', zorder=11)
                    
-        # Key
+        # Key 1 marker
         if has_key is not None and not has_key and hasattr(basic_env, 'fixed_key_loc'):
             key_row, key_col = basic_env.fixed_key_loc
             plot_key_row = H - 1 - key_row
-            ax.text(key_col + 0.85, plot_key_row + 0.85, 'k', ha='center', va='center', 
-                    fontsize=label_fontsize * 0.6, color='gold', weight='bold', zorder=15)
+            ax.text(key_col + 0.85, plot_key_row + 0.85, 'k1', ha='center', va='center', 
+                    fontsize=label_fontsize * 0.6, color='darkred', weight='bold', zorder=15)
+        
+        # Key 2 marker
+        if has_key2 is not None and not has_key2 and hasattr(basic_env, 'fixed_key_loc2'):
+            key2_row, key2_col = basic_env.fixed_key_loc2
+            plot_key2_row = H - 1 - key2_row
+            ax.text(key2_col + 0.85, plot_key2_row + 0.85, 'k2', ha='center', va='center', 
+                    fontsize=label_fontsize * 0.6, color='darkblue', weight='bold', zorder=15)
 
         ax.set_xlim(0, W)
         ax.set_ylim(0, H)
@@ -842,24 +900,33 @@ def _plot_stopping_values_single(network_params, config, save_dir, basic_env, en
     for i in range(n_options, len(axes_flat)):
         axes_flat[i].axis('off')
         
-    # [Rest of saving logic remains the same]
-    if has_key is not None:
+    # Title and saving
+    if has_key2 is not None:
+        key_state_str = f"key1={'Y' if has_key else 'N'}, key2={'Y' if has_key2 else 'N'}"
+        title_suffix = f" ({key_state_str})"
+    elif has_key is not None:
         key_state_str = "with key" if has_key else "without key"
         title_suffix = f" ({key_state_str})"
     else:
         title_suffix = ""
     
-    fig.suptitle(f'Stopping Values for {config["ENV_NAME"]}{title_suffix}.', fontsize=max(12, min(20, 120 / max_dim)))
+    fig.suptitle(f'Stopping Values for {config["ENV_NAME"]}{title_suffix}', fontsize=max(12, min(20, 120 / max_dim)))
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
     os.makedirs(save_dir, exist_ok=True)
     
-    if has_key is not None:
+    if has_key is None and has_key2 is None:
+        save_path = os.path.join(save_dir, f'stopping_vals_{config["ENV_NAME"]}.png')
+    elif has_key2 is not None:
+        # Two-key environment
+        key1_suffix = "_key1" if has_key else "_nokey1"
+        key2_suffix = "_key2" if has_key2 else "_nokey2"
+        save_path = os.path.join(save_dir, f'stopping_vals_{config["ENV_NAME"]}{key1_suffix}{key2_suffix}.png')
+    else:
+        # One-key environment
         key_suffix = "_with_key" if has_key else "_without_key"
         save_path = os.path.join(save_dir, f'stopping_vals_{config["ENV_NAME"]}{key_suffix}.png')
-    else:
-        save_path = os.path.join(save_dir, f'stopping_vals_{config["ENV_NAME"]}.png')
     
-    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.savefig(save_path, dpi=150, bbox_inches='tight')
     plt.close(fig)
 
 def plot_qvals(network_params, config, save_dir):
@@ -867,24 +934,34 @@ def plot_qvals(network_params, config, save_dir):
     # Create environment
     basic_env, env_params = make(config["ENV_NAME"])
     
-    # Check if environment has a key
-    has_key_mechanism = hasattr(basic_env, 'fixed_key_loc') and hasattr(basic_env, 'use_fixed_key_loc')
+    # Check if environment has keys
+    has_one_key = hasattr(basic_env, 'fixed_key_loc') and hasattr(basic_env, 'use_fixed_key_loc')
+    has_two_keys = hasattr(basic_env, 'fixed_key_loc2') and hasattr(basic_env, 'use_fixed_key_loc')
     
-    if has_key_mechanism and basic_env.use_fixed_key_loc:
-        # Plot for both has_key=False and has_key=True
+    if has_two_keys and basic_env.use_fixed_key_loc:
+        # Two-key environment: plot for all four combinations
         for has_key in [False, True]:
-            _plot_qvals_single(network_params, config, save_dir, basic_env, env_params, has_key)
+            for has_key2 in [False, True]:
+                _plot_qvals_single(network_params, config, save_dir, basic_env, env_params, has_key, has_key2)
+    elif has_one_key and basic_env.use_fixed_key_loc:
+        # One-key environment: plot for both has_key=False and has_key=True
+        for has_key in [False, True]:
+            _plot_qvals_single(network_params, config, save_dir, basic_env, env_params, has_key, None)
     else:
         # Plot without key consideration
-        _plot_qvals_single(network_params, config, save_dir, basic_env, env_params, None)
+        _plot_qvals_single(network_params, config, save_dir, basic_env, env_params, None, None)
 
-def _plot_qvals_single(network_params, config, save_dir, basic_env, env_params, has_key):
-    """Optimized Q-value plotter using Quiver for arrows."""
+def _plot_qvals_single(network_params, config, save_dir, basic_env, env_params, has_key, has_key2=None):
+    """Q-value plotter matching dqn.py style with ax.arrow for best actions."""
+    if has_key2 is not None:
+        print(f"Generating Q-value plot for has_key={has_key}, has_key2={has_key2}")
+    else:
+        print("Generating Q-value plot for has_key =", has_key)
     H = basic_env.H
     W = basic_env.W
     
     # 1. Pre-calculate static lists
-    obstacle_locs, penalty_locs, start_locs_list, key_loc = _get_static_locs(basic_env)
+    obstacle_locs, penalty_locs, start_locs_list, key_loc, key_loc2 = _get_static_locs(basic_env)
 
     # Determine n_options from network_params
     n_options = jax.tree_util.tree_leaves(network_params)[0].shape[0]
@@ -969,7 +1046,7 @@ def _plot_qvals_single(network_params, config, save_dir, basic_env, env_params, 
     get_options_qvals = jax.jit(options_network.apply)
 
     # 2. VECTORIZED INFERENCE
-    obs_batch, locations, valid_mask = _get_all_observations_vectorized(basic_env, env_params, has_key)
+    obs_batch, locations, valid_mask = _get_all_observations_vectorized(basic_env, env_params, has_key, has_key2)
     
     q_values_grid = np.zeros((n_options, H, W, 4))
     stop_grid = np.zeros((n_options, H, W))
@@ -977,7 +1054,6 @@ def _plot_qvals_single(network_params, config, save_dir, basic_env, env_params, 
     if len(locations) > 0:
         q_vals_all_options = get_options_qvals(network_params, obs_batch)
         
-        # Helper for stop cond (mocking the call logic slightly for brevity)
         if "percentile" in config["STOPPING_CONDITION"]:
             stop_all, _ = stop_cond(obs_batch)
         else:
@@ -1006,9 +1082,16 @@ def _plot_qvals_single(network_params, config, save_dir, basic_env, env_params, 
     label_fontsize = max(8, min(24, 120 / max_dim))
     edge_linewidth = max(0.3, min(1.0, 8 / max_dim))
 
-    # Directions for arrows (Up, Right, Down, Left)
-    # (U, V) components
-    arrow_dirs = np.array([(0, 1), (1, 0), (0, -1), (-1, 0)])
+    # Direction vectors for each action: up, right, down, left
+    directions = [
+        (0, 0.2),   # up
+        (0.2, 0),   # right
+        (0, -0.2),  # down
+        (-0.2, 0)   # left
+    ]
+    arrow_width = max(0.06, min(0.1, 0.6 / max_dim))
+    arrow_head_width = arrow_width * 3
+    arrow_head_length = arrow_width * 1.5
 
     for option_idx in range(n_options):
         print("Plotting Q-values for option", option_idx)
@@ -1023,7 +1106,7 @@ def _plot_qvals_single(network_params, config, save_dir, basic_env, env_params, 
         else:
             q_min, q_max, q_range = 0, 1, 1
 
-        # Draw Obstacles (Vectorized)
+        # Draw Obstacles
         for r, c in obstacle_locs:
             plot_row = H - 1 - r
             rect = patches.Rectangle((c, plot_row), 1, 1, linewidth=edge_linewidth, edgecolor='black', facecolor='black')
@@ -1036,28 +1119,23 @@ def _plot_qvals_single(network_params, config, save_dir, basic_env, env_params, 
         ax.add_patch(rect)
         ax.text(goal_col + 0.5, plot_goal_row + 0.5, 'G', ha='center', va='center', fontsize=label_fontsize, color='white', weight='bold')
 
-        # PREPARE ARROW DATA FOR QUIVER (Batching Arrows)
-        quiver_X, quiver_Y, quiver_U, quiver_V = [], [], [], []
-
-        # Draw Triangles and Prepare Arrows (Only loop valid locs)
+        # Draw Triangles and Arrows (matching dqn.py style)
         for row, col in locations:
             plot_row = H - 1 - row
             q_vals = current_q_grid[row, col]
             
             # Draw 4 triangles
             triangles = [
-                [(col, plot_row + 1), (col + 1, plot_row + 1), (col + 0.5, plot_row + 0.5)], # up
-                [(col + 1, plot_row + 1), (col + 1, plot_row), (col + 0.5, plot_row + 0.5)],   # right
-                [(col + 1, plot_row), (col, plot_row), (col + 0.5, plot_row + 0.5)],     # down
-                [(col, plot_row), (col, plot_row + 1), (col + 0.5, plot_row + 0.5)]      # left
+                [(col, plot_row + 1), (col + 1, plot_row + 1), (col + 0.5, plot_row + 0.5)],  # up
+                [(col + 1, plot_row + 1), (col + 1, plot_row), (col + 0.5, plot_row + 0.5)],    # right
+                [(col + 1, plot_row), (col, plot_row), (col + 0.5, plot_row + 0.5)],      # down
+                [(col, plot_row), (col, plot_row + 1), (col + 0.5, plot_row + 0.5)]       # left
             ]
             
             for i, (q_val, verts) in enumerate(zip(q_vals, triangles)):
                 intensity = (q_val - q_min) / q_range if q_range > 0 else 0.5
                 color_intensity = float(max(0.1, min(1.0, intensity)))
                 
-                # We still add patches individually here as PolyCollection is complex with text
-                # But we've stripped all other logic out of this loop
                 poly = patches.Polygon(verts, closed=True, facecolor=(0, 0, color_intensity, 0.8), 
                                      edgecolor='black', linewidth=edge_linewidth * 0.5)
                 ax.add_patch(poly)
@@ -1065,26 +1143,21 @@ def _plot_qvals_single(network_params, config, save_dir, basic_env, env_params, 
                 # Text
                 cx = sum(v[0] for v in verts) / 3
                 cy = sum(v[1] for v in verts) / 3
-                ax.text(cx, cy, f'{q_val:.2f}', ha='center', va='center', fontsize=q_value_fontsize, color='white', weight='bold')
+                ax.text(cx, cy, f'{float(q_val):.2f}', ha='center', va='center', fontsize=q_value_fontsize, color='white', weight='bold')
 
-            # Collect Arrow Data
-            q_rounded = np.round(q_vals, 4)
-            best_actions = np.where(q_rounded == q_rounded.max())[0]
+            # White arrows for best action(s) (matching dqn.py style)
+            rounded_q_vals = [round(float(q), 3) for q in q_vals]
+            max_q = max(rounded_q_vals)
+            best_actions = [i for i, q in enumerate(rounded_q_vals) if q == max_q]
             
             for action_idx in best_actions:
-                u, v = arrow_dirs[action_idx]
-                quiver_X.append(col + 0.5)
-                quiver_Y.append(plot_row + 0.5)
-                quiver_U.append(u)
-                quiver_V.append(v)
+                dx, dy = directions[action_idx]
+                ax.arrow(col + 0.5, plot_row + 0.5, dx, dy, 
+                        head_width=arrow_head_width, head_length=arrow_head_length, 
+                        fc='white', ec='black', linewidth=edge_linewidth * 0.5, 
+                        zorder=12, length_includes_head=True)
 
-        # PLOT ALL ARROWS AT ONCE (Quiver)
-        if quiver_X:
-            ax.quiver(quiver_X, quiver_Y, quiver_U, quiver_V, 
-                     color='orange', scale=None, scale_units='xy', angles='xy',
-                     width=0.0075, headwidth=2, headlength=2, pivot='mid', zorder=12, alpha=0.8)
-
-        # Overlays
+        # Stopping overlays
         stop_rows, stop_cols = np.where(stop_grid[option_idx] == 1)
         for r, c in zip(stop_rows, stop_cols):
              plot_row = H - 1 - r
@@ -1092,32 +1165,58 @@ def _plot_qvals_single(network_params, config, save_dir, basic_env, env_params, 
                                      edgecolor='lime', facecolor='none', zorder=10)
              ax.add_patch(rect)
 
+        # Penalties
         for r, c in penalty_locs:
             plot_row = H - 1 - r
-            ax.scatter(c + 0.85, plot_row + 0.85, s=max(20, min(100, 400/max_dim)), c='yellow', edgecolors='black', zorder=10)
+            dot_size = max(20, min(100, 400 / max_dim))
+            ax.scatter(c + 0.85, plot_row + 0.85, s=dot_size, c='yellow', 
+                      edgecolors='black', linewidths=edge_linewidth, zorder=10)
             
+        # Starts
         for r, c in start_locs_list:
             plot_row = H - 1 - r
-            ax.text(c + 0.85, plot_row + 0.85, 's', ha='center', va='center', fontsize=label_fontsize * 0.6, color='green', weight='bold', zorder=11)
+            ax.text(c + 0.85, plot_row + 0.85, 'S', ha='center', va='center', fontsize=label_fontsize, color='green', weight='bold', zorder=11)
 
+        # Key 1 marker
         if has_key is not None and not has_key and hasattr(basic_env, 'fixed_key_loc'):
             key_row, key_col = basic_env.fixed_key_loc
             plot_key_row = H - 1 - key_row
-            ax.text(key_col + 0.85, plot_key_row + 0.85, 'k', ha='center', va='center', 
-                    fontsize=label_fontsize * 0.6, color='gold', weight='bold', zorder=15)
+            ax.text(key_col + 0.85, plot_key_row + 0.85, 'k1', ha='center', va='center', 
+                    fontsize=label_fontsize * 0.6, color='darkred', weight='bold', zorder=15)
+        
+        # Key 2 marker
+        if has_key2 is not None and not has_key2 and hasattr(basic_env, 'fixed_key_loc2'):
+            key2_row, key2_col = basic_env.fixed_key_loc2
+            plot_key2_row = H - 1 - key2_row
+            ax.text(key2_col + 0.85, plot_key2_row + 0.85, 'k2', ha='center', va='center', 
+                    fontsize=label_fontsize * 0.6, color='darkblue', weight='bold', zorder=15)
+
+        # Grid outline for each cell
+        for row in range(H):
+            for col in range(W):
+                plot_row = H - 1 - row
+                rect = patches.Rectangle((col, plot_row), 1, 1, linewidth=edge_linewidth, edgecolor='black', facecolor='none')
+                ax.add_patch(rect)
 
         ax.set_xlim(0, W)
         ax.set_ylim(0, H)
         ax.set_aspect('equal')
         ax.set_xticks([])
         ax.set_yticks([])
-        ax.set_title(f'Option {option_idx} Q-Values', fontsize=max(10, min(16, 100 / max_dim)))
+        ax.set_xticklabels([])
+        ax.set_yticklabels([])
+        title_fontsize = max(10, min(16, 100 / max_dim))
+        ax.set_title(f'Option {option_idx} Q-Values', fontsize=title_fontsize)
+        ax.grid(True, alpha=0.3, linewidth=edge_linewidth * 0.5)
 
     for i in range(n_options, len(axes_flat)):
         axes_flat[i].axis('off')
         
-    # [Rest of saving logic remains the same]
-    if has_key is not None:
+    # Title and saving
+    if has_key2 is not None:
+        key_state_str = f"key1={'Y' if has_key else 'N'}, key2={'Y' if has_key2 else 'N'}"
+        title_suffix = f" ({key_state_str})"
+    elif has_key is not None:
         key_state_str = "with key" if has_key else "without key"
         title_suffix = f" ({key_state_str})"
     else:
@@ -1127,13 +1226,19 @@ def _plot_qvals_single(network_params, config, save_dir, basic_env, env_params, 
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
     os.makedirs(save_dir, exist_ok=True)
     
-    if has_key is not None:
+    if has_key is None and has_key2 is None:
+        save_path = os.path.join(save_dir, f'q_vals_{config["ENV_NAME"]}.png')
+    elif has_key2 is not None:
+        # Two-key environment
+        key1_suffix = "_key1" if has_key else "_nokey1"
+        key2_suffix = "_key2" if has_key2 else "_nokey2"
+        save_path = os.path.join(save_dir, f'q_vals_{config["ENV_NAME"]}{key1_suffix}{key2_suffix}.png')
+    else:
+        # One-key environment
         key_suffix = "_with_key" if has_key else "_without_key"
         save_path = os.path.join(save_dir, f'q_vals_{config["ENV_NAME"]}{key_suffix}.png')
-    else:
-        save_path = os.path.join(save_dir, f'q_vals_{config["ENV_NAME"]}.png')
     
-    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.savefig(save_path, dpi=150, bbox_inches='tight')
     plt.close(fig)
 
 if __name__ == "__main__":
@@ -1256,12 +1361,9 @@ if __name__ == "__main__":
             "EPSILON_FINISH": hypers.get("epsilon_finish", 0.1),
             "EPSILON_ANNEAL_TIME": hypers.get("epsilon_anneal_time", 1),
             "TARGET_UPDATE_INTERVAL": hypers.get("target_update_interval", 64),
-            "CONV1_DIM": hypers.get("conv1_dim", 32),
-            "CONV2_DIM": hypers.get("conv2_dim", 16),
             "REP_DIM": hypers.get("rep_dim", 32),
-            "HEAD_HIDDEN_DIM": hypers.get("head_hidden_dim", 64),
             "ACTIVATION": hypers.get("activation", "relu"),
-            "USE_LAST_HIDDEN": hypers.get("use_last_hidden", False),
+            "USE_LAST_HIDDEN": hypers.get("use_last_hidden", True),
             "STOPPING_CONDITION": hypers.get("stopping_condition", "stomp"),
             "BONUS_WEIGHT": hypers.get("bonus_weight", 10),
             "FEATURE_PARAMS": feature_params,
@@ -1392,8 +1494,7 @@ if __name__ == "__main__":
             base_env, _ = make(config["ENV_NAME"])
             if isinstance(base_env, Gridworld):
                 plot_qvals(plotting_weights, config, save_dir)
-                # plot_stopping_values(plotting_weights, config, save_dir)
-                # plot_rep_heatmaps(plotting_weights, config, save_dir) # This would need to be adapted for options
+                plot_stopping_values(plotting_weights, config, save_dir)
 
         # Save network weights
         if params.get("save_weights", False):
